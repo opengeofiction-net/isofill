@@ -544,7 +544,17 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
         for (xx = 0; xx < cols; xx++) {
             size_t k = (size_t) y * cols + xx;
             short v;
-            if (mask && !mask[k]) { out[k] = NO_ELEV; continue; }
+            if (mask && !mask[k]) {
+                /*
+                 * Outside the mask, invent nothing - but a constraint drawn
+                 * there is still a constraint, and pass 2 interpolates along
+                 * whole rows and columns. Drop it and a coastline just beyond
+                 * the edge stops anchoring the cells inside.
+                 */
+                out[k] = have(&b, xx, y + margin)
+                    ? b.v[(size_t) (y + margin) * cols + xx] : NO_ELEV;
+                continue;
+            }
             v = radius_value(&b, rays, radius, grad_min, xx, y + margin, NULL);
             out[k] = v;
             if (v != NO_ELEV) filled++;
