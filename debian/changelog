@@ -1,3 +1,14 @@
+isofill (0.2.0) unstable; urgency=medium
+
+  * Work band by band above --max-mem, so a whole zone at 1 arcsecond fits:
+    the summed area table alone is 42 GB for an 86401x39601 raster.
+  * --mask bounds where cells may be filled, without narrowing what any cell
+    can see, so a zone-wide run no longer invents terrain across unmapped
+    squares.
+  * Default to all but two cores rather than every core.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Wed, 26 Aug 2026 17:00:00 +0000
+
 isofill (0.1.0) unstable; urgency=medium
 
   * First package. Both passes of the contour fill, in C against GDAL.
