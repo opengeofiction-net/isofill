@@ -317,6 +317,74 @@ static void interp_line(const short *in, short *out, short *grad, int n)
     }
 }
 
+static void weighted_linear(short *v, int cols, int rows);
+
+/*
+ * Pass 2 the way the original ran it. It never saw more than one tile: 512
+ * square with a margin of 128, both passes over the 768 window, and only the
+ * central 512 kept - surroundTile and extractSubtile in ElevationTile.pm. That
+ * bound is not incidental. Every row and column is anchored at zero beyond its
+ * ends, so the length of the line decides how far a value carries, and a whole
+ * zone is a row of 86401 cells where the original's was 768. Run unbounded, a
+ * single filled cell in the water spreads down its whole row and column: on
+ * alved, pass 1 leaves 2.30% of the water carrying elevation and pass 2 takes
+ * that to 9.67%.
+ *
+ * The window is expressed in radii rather than cells so it holds at any
+ * resolution - the original's 512 and 128 are 25.6 and 6.4 times its radius of
+ * 20.
+ */
+static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALDatasetH out,
+                        int cols, int rows, int tile, int margin)
+{
+    GDALRasterBandH p1b = GDALGetRasterBand(p1, 1);
+    GDALRasterBandH ob = GDALGetRasterBand(out, 1);
+    int wmax = tile + 2 * margin;
+    short *buf = malloc((size_t) wmax * wmax * sizeof *buf);
+    unsigned char *m = mb ? malloc((size_t) tile * tile) : NULL;
+    int tx, ty;
+
+    if (!buf || (mb && !m)) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+
+    for (ty = 0; ty < rows; ty += tile) {
+        for (tx = 0; tx < cols; tx += tile) {
+            int w = (tx + tile <= cols) ? tile : cols - tx;
+            int h = (ty + tile <= rows) ? tile : rows - ty;
+            int wx0 = tx - margin, wy0 = ty - margin;
+            int wx1 = tx + w + margin, wy1 = ty + h + margin;
+            int ww, wh, ox, oy, y;
+
+            if (wx0 < 0) wx0 = 0;
+            if (wy0 < 0) wy0 = 0;
+            if (wx1 > cols) wx1 = cols;
+            if (wy1 > rows) wy1 = rows;
+            ww = wx1 - wx0; wh = wy1 - wy0;
+            ox = tx - wx0; oy = ty - wy0;
+
+            IO_(GDALRasterIO(p1b, GF_Read, wx0, wy0, ww, wh, buf, ww, wh,
+                             GDT_Int16, 0, 0));
+            weighted_linear(buf, ww, wh);
+
+            if (m) {
+                int x;
+                IO_(GDALRasterIO(mb, GF_Read, tx, ty, w, h, m, w, h,
+                                 GDT_Byte, 0, 0));
+                for (y = 0; y < h; y++)
+                    for (x = 0; x < w; x++)
+                        if (!m[(size_t) y * w + x])
+                            buf[(size_t) (oy + y) * ww + ox + x] = 0;
+            }
+            IO_(GDALRasterIO(ob, GF_Write, tx, ty, w, h,
+                             buf + (size_t) oy * ww + ox, w, h, GDT_Int16,
+                             sizeof *buf, (GSpacing) ww * sizeof *buf));
+        }
+        fprintf(stderr, "\r  pass 2 %d%%", (int) (100.0 * (ty + tile) / rows));
+    }
+    fprintf(stderr, "\r  pass 2 complete, %d windows of %d with %d margin\n",
+            ((cols + tile - 1) / tile) * ((rows + tile - 1) / tile), tile, margin);
+    free(buf); free(m);
+}
+
 /*
  * Pass 2 over a raster too large to hold. The column interpolation needs whole
  * columns and the row interpolation needs whole rows, so the columns go to two
@@ -476,6 +544,10 @@ static void usage(void)
         "  --mask FILE    a raster the size of the constraints: where it is zero\n"
         "                 no cell is filled, though contours there still count as\n"
         "                 evidence for cells outside it\n"
+        "  --pass2-tile N     second pass window, in cells (default 0, the\n"
+        "                 whole raster). Bounds how far a value carries; the\n"
+        "                 original used 25 * radius\n"
+        "  --pass2-margin N   overlap around each window (default 6 * radius)\n"
         "  --max-mem MB   above this, work band by band through a temporary\n"
         "                 beside the output (default 4096)\n"
         "  --threads N    (default: all but two, to leave the box usable)\n");
@@ -571,12 +643,15 @@ int main(int argc, char **argv)
     const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
     int radius = 20, do_pass2 = 1, threads = 0, i;
     double grad_min = 0.1, max_mem = 4096;
+    int p2_tile = -1, p2_margin = -1;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--radius") && i + 1 < argc) radius = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--grad-min") && i + 1 < argc) grad_min = atof(argv[++i]);
         else if (!strcmp(argv[i], "--max-mem") && i + 1 < argc) max_mem = atof(argv[++i]);
         else if (!strcmp(argv[i], "--mask") && i + 1 < argc) mask_path = argv[++i];
+        else if (!strcmp(argv[i], "--pass2-tile") && i + 1 < argc) p2_tile = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) p2_margin = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-pass2")) do_pass2 = 0;
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--explain") && i + 2 < argc) {
@@ -637,6 +712,18 @@ int main(int argc, char **argv)
         }
         rays = rays_build(radius);
 
+        /*
+         * Whole raster by default. The original bounded this to a 512 tile with
+         * a 128 margin, and reproducing that was worth measuring, but it buys
+         * nothing here: on alved it moves the water carrying 10 m or more not at
+         * all, and shifts the land by a median of 1 m for the trouble. Left as an
+         * option because it is the only thing which bounds how far a value
+         * carries when there is no mask to bound it.
+         */
+        if (p2_tile < 0) p2_tile = 0;
+        if (p2_margin < 0) p2_margin = 6 * radius;
+        if (p2_tile == 0) p2_tile = (cols > rows ? cols : rows);
+
         /* values, mask, output and the summed area table, in megabytes */
         whole_mb = ((double) cols * rows * 5.0
                     + (double) (cols + 1) * (rows + 1) * 8.0) / (1024 * 1024);
@@ -657,6 +744,27 @@ int main(int argc, char **argv)
                                 cols, rows, 0, rows, out);
             fprintf(stderr, "  pass 1 set %lld of %lld cells\n", filled,
                     (long long) cols * rows);
+            if (do_pass2 && p2_tile < (cols > rows ? cols : rows)) {
+                /* the tiled path needs pass 1 back as a raster to window over */
+                char tp[4096];
+                GDALDatasetH p1;
+                snprintf(tp, sizeof tp, "%s.pass1.tif", out_path);
+                p1 = GDALCreate(GDALGetDriverByName("GTiff"), tp, cols, rows, 1,
+                                GDT_Int16, opts);
+                if (!p1) { fprintf(stderr, "isofill: cannot create %s\n", tp); return 1; }
+                IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Write, 0, 0, cols,
+                                 rows, out, cols, rows, GDT_Int16, 0, 0));
+                dst = GDALCreate(GDALGetDriverByName("GTiff"), out_path, cols, rows,
+                                 1, GDT_Int16, opts);
+                GDALSetGeoTransform(dst, gt);
+                GDALSetProjection(dst, GDALGetProjectionRef(src));
+                pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin);
+                GDALClose(dst); GDALClose(p1); VSIUnlink(tp);
+                free(out);
+                if (msk) GDALClose(msk);
+                GDALClose(src); CSLDestroy(opts); rays_free(rays);
+                return 0;
+            }
             if (do_pass2) {
                 weighted_linear(out, cols, rows);
                 if (mb) {
@@ -740,11 +848,14 @@ int main(int argc, char **argv)
                 if (chunk > rows) chunk = rows;
                 fprintf(stderr, "  pass 2: %d column strips, %d row chunks\n",
                         (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
-                if (!weighted_linear_ooc(p1, mb, t2, t3, dst, cols, rows, strip,
-                                         chunk, opts))
+                if (p2_tile < (cols > rows ? cols : rows)) {
+                    pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin);
+                } else if (!weighted_linear_ooc(p1, mb, t2, t3, dst, cols, rows,
+                                                strip, chunk, opts)) {
                     fprintf(stderr, "isofill: pass 2 failed\n");
-                else
+                } else {
                     fprintf(stderr, "  pass 2 complete\n");
+                }
             } else {
                 short *row = malloc((size_t) cols * sizeof *row);
                 int y;
