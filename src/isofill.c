@@ -324,7 +324,8 @@ static void interp_line(const short *in, short *out, short *grad, int n)
  * Only the column results are stored - a row is interpolated in memory as it is
  * combined.
  */
-static int weighted_linear_ooc(GDALDatasetH p1, const char *tmp_pv,
+static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
+                               const char *tmp_pv,
                                const char *tmp_gv, GDALDatasetH out,
                                int cols, int rows, int strip_w, int chunk_h,
                                char **opts)
@@ -379,6 +380,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, const char *tmp_pv,
         short *cgh  = malloc((size_t) cols * chunk_h * sizeof *cgh);
         short *cpv  = malloc((size_t) cols * chunk_h * sizeof *cpv);
         unsigned char *cgv = malloc((size_t) cols * chunk_h);
+        unsigned char *cm = mb ? malloc((size_t) cols * chunk_h) : NULL;
         GDALRasterBandH ob = GDALGetRasterBand(out, 1);
         int y0, h;
 
@@ -393,6 +395,8 @@ static int weighted_linear_ooc(GDALDatasetH p1, const char *tmp_pv,
                              GDT_Int16, 0, 0));
             IO_(GDALRasterIO(bgv, GF_Read, 0, y0, cols, h, cgv, cols, h,
                              GDT_Byte, 0, 0));
+            if (cm) IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, h, cm, cols, h,
+                                     GDT_Byte, 0, 0));
             memset(cgh, 0, (size_t) cols * h * sizeof *cgh);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -405,14 +409,15 @@ static int weighted_linear_ooc(GDALDatasetH p1, const char *tmp_pv,
                     double dd = cgh[o + xx] + cgv[o + xx] + .01;
                     double dH = (cgh[o + xx] + .005) / dd;
                     double dV = (cgv[o + xx] + .005) / dd;
-                    cin[o + xx] = (short) floor(dH * chh[o + xx]
-                                                + dV * cpv[o + xx] + .5);
+                    cin[o + xx] = (cm && !cm[o + xx]) ? 0
+                        : (short) floor(dH * chh[o + xx]
+                                        + dV * cpv[o + xx] + .5);
                 }
             }
             IO_(GDALRasterIO(ob, GF_Write, 0, y0, cols, h, cin, cols, h,
                              GDT_Int16, 0, 0));
         }
-        free(cin); free(chh); free(cgh); free(cpv); free(cgv);
+        free(cin); free(chh); free(cgh); free(cpv); free(cgv); free(cm);
     }
 
     free(colbuf); free(cout); free(cgrad); free(stripv); free(stripg);
@@ -468,6 +473,9 @@ static void usage(void)
         "  --grad-min F   least gradient, metres per cell, which counts as a\n"
         "                 slope worth interpolating across (default 0.1)\n"
         "  --no-pass2     leave cells the first pass declined unset\n"
+        "  --mask FILE    a raster the size of the constraints: where it is zero\n"
+        "                 no cell is filled, though contours there still count as\n"
+        "                 evidence for cells outside it\n"
         "  --max-mem MB   above this, work band by band through a temporary\n"
         "                 beside the output (default 4096)\n"
         "  --threads N    (default: all cores)\n");
@@ -481,11 +489,13 @@ static void usage(void)
  * table is the reason this matters: it is eight bytes a cell, and on a zone of
  * 2.5 gigapixels that alone is twenty gigabytes.
  */
-static long long pass1_band(GDALRasterBandH sb, const Rays *rays, int radius,
+static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
+                            const Rays *rays, int radius,
                             double grad_min, int has_nd, double nd,
                             int cols, int rows, int y0, int h,
                             short *out)
 {
+    unsigned char *mask = NULL;
     int top = y0 - radius, bot = y0 + h + radius;
     int bh, margin, y;
     long long filled = 0;
@@ -514,25 +524,41 @@ static long long pass1_band(GDALRasterBandH sb, const Rays *rays, int radius,
     }
     build_sat(&b);
 
+    /*
+     * The mask says where a cell may be filled, not which constraints count -
+     * a contour just outside it is still evidence for a cell just inside, so
+     * the band is read whole and only the writing is restricted.
+     */
+    if (mb) {
+        mask = malloc((size_t) cols * h);
+        if (!mask) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+        IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, h, mask, cols, h,
+                         GDT_Byte, 0, 0));
+    }
+
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 16) reduction(+:filled)
 #endif
     for (y = 0; y < h; y++) {
         int xx;
         for (xx = 0; xx < cols; xx++) {
-            short v = radius_value(&b, rays, radius, grad_min, xx, y + margin, NULL);
-            out[(size_t) y * cols + xx] = v;
+            size_t k = (size_t) y * cols + xx;
+            short v;
+            if (mask && !mask[k]) { out[k] = NO_ELEV; continue; }
+            v = radius_value(&b, rays, radius, grad_min, xx, y + margin, NULL);
+            out[k] = v;
             if (v != NO_ELEV) filled++;
         }
     }
 
+    free(mask);
     free(b.v); free(b.is); free(b.sat);
     return filled;
 }
 
 int main(int argc, char **argv)
 {
-    const char *in_path = NULL, *out_path = NULL;
+    const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
     int radius = 20, do_pass2 = 1, threads = 0, i;
     double grad_min = 0.1, max_mem = 4096;
 
@@ -540,6 +566,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--radius") && i + 1 < argc) radius = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--grad-min") && i + 1 < argc) grad_min = atof(argv[++i]);
         else if (!strcmp(argv[i], "--max-mem") && i + 1 < argc) max_mem = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--mask") && i + 1 < argc) mask_path = argv[++i];
         else if (!strcmp(argv[i], "--no-pass2")) do_pass2 = 0;
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--explain") && i + 2 < argc) {
@@ -559,7 +586,8 @@ int main(int argc, char **argv)
     GDALAllRegister();
     {
         GDALDatasetH src = GDALOpen(in_path, GA_ReadOnly);
-        GDALRasterBandH sb;
+        GDALDatasetH msk = NULL;
+        GDALRasterBandH sb, mb = NULL;
         int cols, rows, has_nd = 0;
         double nd, gt[6], whole_mb;
         Rays *rays;
@@ -573,6 +601,18 @@ int main(int argc, char **argv)
         rows = GDALGetRasterYSize(src);
         nd = GDALGetRasterNoDataValue(sb, &has_nd);
         GDALGetGeoTransform(src, gt);
+        if (mask_path) {
+            msk = GDALOpen(mask_path, GA_ReadOnly);
+            if (!msk) {
+                fprintf(stderr, "isofill: cannot open %s\n", mask_path); return 1;
+            }
+            if (GDALGetRasterXSize(msk) != cols || GDALGetRasterYSize(msk) != rows) {
+                fprintf(stderr, "isofill: mask is %dx%d, constraints are %dx%d\n",
+                        GDALGetRasterXSize(msk), GDALGetRasterYSize(msk), cols, rows);
+                return 1;
+            }
+            mb = GDALGetRasterBand(msk, 1);
+        }
         rays = rays_build(radius);
 
         /* values, mask, output and the summed area table, in megabytes */
@@ -591,12 +631,21 @@ int main(int argc, char **argv)
             /* small enough to hold: one band, one write, pass 2 in memory */
             short *out = malloc((size_t) cols * rows * sizeof *out);
             if (!out) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
-            filled = pass1_band(sb, rays, radius, grad_min, has_nd, nd,
+            filled = pass1_band(sb, mb, rays, radius, grad_min, has_nd, nd,
                                 cols, rows, 0, rows, out);
             fprintf(stderr, "  pass 1 set %lld of %lld cells\n", filled,
                     (long long) cols * rows);
             if (do_pass2) {
                 weighted_linear(out, cols, rows);
+                if (mb) {
+                    unsigned char *m = malloc((size_t) cols * rows);
+                    size_t k, n = (size_t) cols * rows;
+                    if (!m) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                    IO_(GDALRasterIO(mb, GF_Read, 0, 0, cols, rows, m, cols, rows,
+                                     GDT_Byte, 0, 0));
+                    for (k = 0; k < n; k++) if (!m[k]) out[k] = 0;
+                    free(m);
+                }
                 fprintf(stderr, "  pass 2 complete\n");
             }
             dst = GDALCreate(GDALGetDriverByName("GTiff"), out_path, cols, rows, 1,
@@ -642,7 +691,7 @@ int main(int argc, char **argv)
 
             for (y0 = 0; y0 < rows; y0 += band_rows) {
                 h = (y0 + band_rows <= rows) ? band_rows : rows - y0;
-                filled += pass1_band(sb, rays, radius, grad_min, has_nd, nd,
+                filled += pass1_band(sb, mb, rays, radius, grad_min, has_nd, nd,
                                      cols, rows, y0, h, out);
                 IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Write, 0, y0, cols, h,
                                  out, cols, h, GDT_Int16, 0, 0));
@@ -669,7 +718,7 @@ int main(int argc, char **argv)
                 if (chunk > rows) chunk = rows;
                 fprintf(stderr, "  pass 2: %d column strips, %d row chunks\n",
                         (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
-                if (!weighted_linear_ooc(p1, t2, t3, dst, cols, rows, strip,
+                if (!weighted_linear_ooc(p1, mb, t2, t3, dst, cols, rows, strip,
                                          chunk, opts))
                     fprintf(stderr, "isofill: pass 2 failed\n");
                 else
@@ -691,6 +740,7 @@ int main(int argc, char **argv)
             VSIUnlink(t1); VSIUnlink(t2); VSIUnlink(t3);
         }
 
+        if (msk) GDALClose(msk);
         GDALClose(src);
         CSLDestroy(opts);
         rays_free(rays);
