@@ -478,7 +478,7 @@ static void usage(void)
         "                 evidence for cells outside it\n"
         "  --max-mem MB   above this, work band by band through a temporary\n"
         "                 beside the output (default 4096)\n"
-        "  --threads N    (default: all cores)\n");
+        "  --threads N    (default: all but two, to leave the box usable)\n");
     exit(2);
 }
 
@@ -580,7 +580,19 @@ int main(int argc, char **argv)
     }
     if (!in_path || !out_path) usage();
 #ifdef _OPENMP
-    if (threads > 0) omp_set_num_threads(threads);
+    /*
+     * All but two cores by default. util renders tiles and serves the wiki
+     * while this runs, and a fill which takes every core starves them - the
+     * headroom matters more than the last 30% of the speedup.
+     */
+    if (threads <= 0) {
+        threads = omp_get_num_procs() - 2;
+        if (threads < 1) threads = 1;
+    }
+    omp_set_num_threads(threads);
+    fprintf(stderr, "  %d of %d cores\n", threads, omp_get_num_procs());
+#else
+    (void) threads;
 #endif
 
     GDALAllRegister();
