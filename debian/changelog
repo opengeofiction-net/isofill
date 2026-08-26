@@ -1,3 +1,15 @@
+isofill (0.3.1) unstable; urgency=medium
+
+  * Fix an out of memory on wide zones. The windowed second pass sized its
+    buffer as (tile + 2 * margin) squared, so a whole-raster tile on axian's
+    64801x32401 asked for 8.6 GB rather than 4.3 GB, and 0.3.0 routed every
+    large zone through it because the streaming pass could not honour --reach.
+  * The streaming second pass now honours it, so large zones take that path
+    again. Verified identical to the in-memory path on alved, 0 cells of
+    51,854,401 differing.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Thu, 27 Aug 2026 00:30:00 +0000
+
 isofill (0.3.0) unstable; urgency=medium
 
   * The second pass no longer carries a value into cells the first pass had no

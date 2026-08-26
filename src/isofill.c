@@ -417,12 +417,19 @@ static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALDatasetH out,
     size_t orn = 0;
     GDALRasterBandH p1b = GDALGetRasterBand(p1, 1);
     GDALRasterBandH ob = GDALGetRasterBand(out, 1);
-    int wmax = tile + 2 * margin;
-    short *buf = malloc((size_t) wmax * wmax * sizeof *buf);
+    /* the window is as big as the tile allows in each axis - square it and a
+     * whole-raster tile on a wide zone asks for the long side twice */
+    int ww_max = (tile < cols ? tile : cols) + 2 * margin;
+    int wh_max = (tile < rows ? tile : rows) + 2 * margin;
+    short *buf = malloc((size_t) ww_max * wh_max * sizeof *buf);
     unsigned char *m = mb ? malloc((size_t) tile * tile) : NULL;
     int tx, ty;
 
-    if (!buf || (mb && !m)) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+    if (!buf || (mb && !m)) {
+        fprintf(stderr, "isofill: out of memory for a %dx%d pass 2 window\n",
+                ww_max, wh_max);
+        exit(1);
+    }
 
     for (ty = 0; ty < rows; ty += tile) {
         for (tx = 0; tx < cols; tx += tile) {
@@ -485,7 +492,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
                                const char *tmp_pv,
                                const char *tmp_gv, GDALDatasetH out,
                                int cols, int rows, int strip_w, int chunk_h,
-                               char **opts)
+                               char **opts, int reach)
 {
     GDALRasterBandH p1b = GDALGetRasterBand(p1, 1);
     GDALDatasetH dpv, dgv;
@@ -538,6 +545,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
         short *cpv  = malloc((size_t) cols * chunk_h * sizeof *cpv);
         unsigned char *cgv = malloc((size_t) cols * chunk_h);
         unsigned char *cm = mb ? malloc((size_t) cols * chunk_h) : NULL;
+        unsigned char *co = reach ? malloc((size_t) cols * chunk_h) : NULL;
         GDALRasterBandH ob = GDALGetRasterBand(out, 1);
         int y0, h;
 
@@ -554,6 +562,12 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
                              GDT_Byte, 0, 0));
             if (cm) IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, h, cm, cols, h,
                                      GDT_Byte, 0, 0));
+            /* what the first pass never reached, captured before interp_line
+             * overwrites the chunk - it takes no value from the second pass */
+            if (co) {
+                size_t k, n = (size_t) cols * h;
+                for (k = 0; k < n; k++) co[k] = (cin[k] == OUT_OF_REACH);
+            }
             memset(cgh, 0, (size_t) cols * h * sizeof *cgh);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -566,7 +580,8 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
                     double dd = cgh[o + xx] + cgv[o + xx] + .01;
                     double dH = (cgh[o + xx] + .005) / dd;
                     double dV = (cgv[o + xx] + .005) / dd;
-                    cin[o + xx] = (cm && !cm[o + xx]) ? 0
+                    cin[o + xx] = ((cm && !cm[o + xx]) || (co && co[o + xx]))
+                        ? 0
                         : (short) floor(dH * chh[o + xx]
                                         + dV * cpv[o + xx] + .5);
                 }
@@ -574,7 +589,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
             IO_(GDALRasterIO(ob, GF_Write, 0, y0, cols, h, cin, cols, h,
                              GDT_Int16, 0, 0));
         }
-        free(cin); free(chh); free(cgh); free(cpv); free(cgv); free(cm);
+        free(cin); free(chh); free(cgh); free(cpv); free(cgv); free(cm); free(co);
     }
 
     free(colbuf); free(cout); free(cgrad); free(stripv); free(stripg);
@@ -960,13 +975,8 @@ int main(int argc, char **argv)
                         (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
                 if (p2_tile < (cols > rows ? cols : rows)) {
                     pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin, reach);
-                } else if (reach) {
-                    /* the streaming pass 2 has no way to remember which cells
-                     * were out of reach, so take the windowed one, which has */
-                    pass2_tiled(p1, mb, dst, cols, rows,
-                                (cols > rows ? cols : rows), p2_margin, reach);
                 } else if (!weighted_linear_ooc(p1, mb, t2, t3, dst, cols, rows,
-                                                strip, chunk, opts)) {
+                                                strip, chunk, opts, reach)) {
                     fprintf(stderr, "isofill: pass 2 failed\n");
                 } else {
                     fprintf(stderr, "  pass 2 complete\n");
