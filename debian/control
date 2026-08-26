@@ -1,0 +1,29 @@
+Source: isofill
+Section: science
+Priority: optional
+Maintainer: Lee Kindness <wangi@opengeofiction.net>
+Build-Depends: debhelper-compat (= 13), libgdal-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/opengeofiction-net/isofill
+Rules-Requires-Root: no
+
+Package: isofill
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: fill a raster from rasterised contour lines
+ isofill turns a raster of contour lines into a continuous surface. For each
+ cell it gathers the contours within a search radius which are in line of sight
+ - the straight line to them crossing no other contour - takes the pair with the
+ steepest gradient across the cell, and interpolates between them.
+ .
+ Where no two differing elevations are in sight it declines to fill the cell at
+ all, rather than extrapolating from one. That is what keeps water enclosed by a
+ coastline empty, and stops a headland casting a plume of invented elevation
+ downrange. A second pass interpolates each row and column between its known
+ values, anchored at zero beyond both ends, so those declined cells settle at the
+ level of whatever surrounds them.
+ .
+ It exists because the obvious tools do not do this. gdal_fillnodata will
+ interpolate from a single sample, which terraces the surface into plateaus and
+ pushes elevation out into open water; gdal_grid triangulates, which is far
+ slower and takes no account of contours as barriers.

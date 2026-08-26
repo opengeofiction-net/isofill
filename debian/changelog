@@ -1,0 +1,5 @@
+isofill (0.1.0) unstable; urgency=medium
+
+  * First package. Both passes of the contour fill, in C against GDAL.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Wed, 26 Aug 2026 09:00:00 +0000
