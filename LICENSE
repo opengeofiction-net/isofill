@@ -1,0 +1,34 @@
+# Licence
+
+isofill is free software, on the same terms as Perl itself: you may use, copy,
+modify and distribute it under **either** the Artistic Licence 1.0 **or** the
+GNU General Public Licence version 1, or (at your option) any later version of
+the GPL.
+
+    SPDX-License-Identifier: Artistic-1.0 OR GPL-1.0-or-later
+
+The full texts are in `licences/Artistic` and `licences/GPL-1`.
+
+## Why these terms and not something more permissive
+
+isofill is derived from the terrain code of OGF-terrain-tools, which carries
+those terms, so it inherits them. The derivation is direct rather than
+incidental: the ray generator in `original/tile_util.c` is transliterated
+essentially line for line, and the interpolation rules it implements - the
+search for the steepest pair of visible contours, the
+`(v1*d2 + v2*d1) / (d1 + d2)` weighting between them, the gradient floor which
+refuses to extrapolate from a single elevation, and the second pass which
+anchors each row and column at zero - are that code's design, not a fresh one.
+
+A permissive licence was considered and is not ours to grant. Only the original
+author could relicence that work.
+
+## Copyright
+
+    Copyright (c) 2017-2020 Thilo Stapff
+    Copyright (c) 2026 Lee Kindness and OpenGeofiction administrators
+
+The first commit on this repository is the original C, imported unchanged from
+the `thilo-dem-process` tag of OGF-terrain-tools, so that what was inherited and
+what was written here can be told apart from the history alone. It is kept in
+`original/` for reference and is not built.
