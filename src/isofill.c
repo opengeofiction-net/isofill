@@ -188,7 +188,57 @@ static void rays_free(Rays *r)
 
 #define MAX_LEVELS 64
 
-typedef struct { int rows, cols; short *v; unsigned char *is; long long *sat; } Band;
+typedef struct {
+    int rows, cols;
+    short *v;
+    unsigned char *is;    /* a constraint: carries a value */
+    unsigned char *blk;   /* blocks sight: is, widened by --barrier */
+    long long *sat;
+} Band;
+
+/*
+ * Sight is blocked by the widened mask, not the constraint mask. At 3
+ * arcseconds a one cell coastline is a 93 m wall; at 1 arcsecond the same one
+ * cell is 31 m, so scaling the radius to hold the search distance left the
+ * barrier three times thinner in ground terms and rays began threading gaps
+ * which could not exist on the coarser grid. Widening the rasterised line
+ * instead would write its elevation into the cells it gained, which is a
+ * different and worse thing: what a cell is worth and what it hides are
+ * separate questions.
+ */
+static inline int blocks(const Band *b, int x, int y)
+{
+    if (x < 0 || y < 0 || x >= b->cols || y >= b->rows)
+        return 0;
+    return b->blk[(size_t) y * b->cols + x];
+}
+
+static void dilate(Band *b, int n)
+{
+    unsigned char *tmp;
+    int x, y, k;
+
+    b->blk = malloc((size_t) b->cols * b->rows);
+    if (!b->blk) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+    memcpy(b->blk, b->is, (size_t) b->cols * b->rows);
+    if (n <= 0) return;
+
+    tmp = malloc((size_t) b->cols * b->rows);
+    if (!tmp) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+    for (k = 0; k < n; k++) {           /* n square dilations, separable */
+        memcpy(tmp, b->blk, (size_t) b->cols * b->rows);
+        for (y = 0; y < b->rows; y++)
+            for (x = 0; x < b->cols; x++) {
+                size_t i = (size_t) y * b->cols + x;
+                if (tmp[i]) continue;
+                if ((x > 0 && tmp[i - 1]) || (x + 1 < b->cols && tmp[i + 1])
+                    || (y > 0 && tmp[i - b->cols])
+                    || (y + 1 < b->rows && tmp[i + b->cols]))
+                    b->blk[i] = 1;
+            }
+    }
+    free(tmp);
+}
 
 static inline int have(const Band *b, int x, int y)
 {
@@ -229,7 +279,7 @@ static void build_sat(Band *b)
 static int g_explain_x = -1, g_explain_y = -1;
 
 static short radius_value(const Band *b, const Rays *r, int radius,
-                          double grad_min, int x0, int y0,
+                          double grad_min, int barrier, int x0, int y0,
                           unsigned char *blocked)
 {
     int explain = (x0 == g_explain_x && y0 == g_explain_y);
@@ -250,7 +300,17 @@ static short radius_value(const Band *b, const Rays *r, int radius,
         if (!have(b, x, y))
             continue;
         for (p = 0; p < o->n; p++) {
-            if (have(b, x0 + r->px[o->first + p], y0 + r->py[o->first + p])) {
+            int px = r->px[o->first + p], py = r->py[o->first + p];
+            int adx = abs(px - o->dx), ady = abs(py - o->dy);
+            /*
+             * Near the target use the exact mask, so a constraint is never
+             * hidden behind its own widening; everywhere else use the widened
+             * one. Chebyshev, because the dilation is square.
+             */
+            int hit = ((adx > barrier || ady > barrier)
+                       ? blocks(b, x0 + px, y0 + py)
+                       : have(b, x0 + px, y0 + py));
+            if (hit) {
                 blk = 1;
                 break;
             }
@@ -567,6 +627,9 @@ static void usage(void)
     fprintf(stderr,
         "usage: isofill [options] <constraints.tif> <out.tif>\n"
         "  --radius N     search radius in cells (default 20)\n"
+        "  --barrier N    widen constraints by N cells for the sight test only,\n"
+        "                 not for their values (default 1). At 1 arcsecond a one\n"
+        "                 cell line is a third of the wall it was at 3\n"
         "  --grad-min F   least gradient, metres per cell, which counts as a\n"
         "                 slope worth interpolating across (default 0.1)\n"
         "  --no-pass2     leave cells the first pass declined unset\n"
@@ -595,7 +658,7 @@ static void usage(void)
  */
 static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
                             const Rays *rays, int radius,
-                            double grad_min, int has_nd, double nd,
+                            double grad_min, int barrier, int has_nd, double nd,
                             int cols, int rows, int y0, int h,
                             short *out)
 {
@@ -627,6 +690,7 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
         }
     }
     build_sat(&b);
+    dilate(&b, barrier);
 
     /*
      * The mask says where a cell may be filled, not which constraints count -
@@ -659,14 +723,14 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
                     ? b.v[(size_t) (y + margin) * cols + xx] : OUT_OF_REACH;
                 continue;
             }
-            v = radius_value(&b, rays, radius, grad_min, xx, y + margin, NULL);
+            v = radius_value(&b, rays, radius, grad_min, barrier, xx, y + margin, NULL);
             out[k] = v;
             if (v != NO_ELEV && v != OUT_OF_REACH) filled++;
         }
     }
 
     free(mask);
-    free(b.v); free(b.is); free(b.sat);
+    free(b.v); free(b.is); free(b.blk); free(b.sat);
     return filled;
 }
 
@@ -675,13 +739,14 @@ int main(int argc, char **argv)
     const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
     int radius = 20, do_pass2 = 1, threads = 0, i;
     double grad_min = 0.1, max_mem = 4096;
-    int p2_tile = -1, p2_margin = -1, reach = 1;
+    int p2_tile = -1, p2_margin = -1, reach = 1, barrier = 1;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--radius") && i + 1 < argc) radius = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--grad-min") && i + 1 < argc) grad_min = atof(argv[++i]);
         else if (!strcmp(argv[i], "--max-mem") && i + 1 < argc) max_mem = atof(argv[++i]);
         else if (!strcmp(argv[i], "--mask") && i + 1 < argc) mask_path = argv[++i];
+        else if (!strcmp(argv[i], "--barrier") && i + 1 < argc) barrier = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-reach")) reach = 0;
         else if (!strcmp(argv[i], "--pass2-tile") && i + 1 < argc) p2_tile = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) p2_margin = atoi(argv[++i]);
@@ -773,7 +838,7 @@ int main(int argc, char **argv)
             /* small enough to hold: one band, one write, pass 2 in memory */
             short *out = malloc((size_t) cols * rows * sizeof *out);
             if (!out) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
-            filled = pass1_band(sb, mb, rays, radius, grad_min, has_nd, nd,
+            filled = pass1_band(sb, mb, rays, radius, grad_min, barrier, has_nd, nd,
                                 cols, rows, 0, rows, out);
             fprintf(stderr, "  pass 1 set %lld of %lld cells\n", filled,
                     (long long) cols * rows);
@@ -866,7 +931,7 @@ int main(int argc, char **argv)
 
             for (y0 = 0; y0 < rows; y0 += band_rows) {
                 h = (y0 + band_rows <= rows) ? band_rows : rows - y0;
-                filled += pass1_band(sb, mb, rays, radius, grad_min, has_nd, nd,
+                filled += pass1_band(sb, mb, rays, radius, grad_min, barrier, has_nd, nd,
                                      cols, rows, y0, h, out);
                 IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Write, 0, y0, cols, h,
                                  out, cols, h, GDT_Int16, 0, 0));
