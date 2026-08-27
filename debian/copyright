@@ -1,0 +1,16 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: isofill
+Source: https://github.com/opengeofiction-net/isofill
+
+Files: *
+Copyright: 2017-2020 Thilo Stapff
+           2026 Lee Kindness and OpenGeofiction administrators
+License: Artistic-1.0 or GPL-1.0-or-later
+ isofill is derived from the terrain code of OGF-terrain-tools, kept in
+ original/, and carries the same terms: you may use, copy, modify and
+ distribute it under either the Artistic Licence 1.0 or the GNU General Public
+ Licence version 1, or at your option any later version of the GPL.
+ .
+ The full texts are in licences/Artistic and licences/GPL-1 in the source, and
+ on Debian systems in /usr/share/common-licenses/Artistic and
+ /usr/share/common-licenses/GPL-1.

@@ -1,0 +1,9 @@
+#!/usr/bin/make -f
+
+# PREFIX defaults to /usr/local, which is right for a make install by hand and
+# forbidden in a package - dh_usrlocal stops the build over it.
+override_dh_auto_install:
+	dh_auto_install -- PREFIX=/usr
+
+%:
+	dh $@

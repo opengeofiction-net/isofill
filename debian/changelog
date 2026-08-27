@@ -1,0 +1,39 @@
+isofill (0.3.1) unstable; urgency=medium
+
+  * Fix an out of memory on wide zones. The windowed second pass sized its
+    buffer as (tile + 2 * margin) squared, so a whole-raster tile on axian's
+    64801x32401 asked for 8.6 GB rather than 4.3 GB, and 0.3.0 routed every
+    large zone through it because the streaming pass could not honour --reach.
+  * The streaming second pass now honours it, so large zones take that path
+    again. Verified identical to the in-memory path on alved, 0 cells of
+    51,854,401 differing.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Thu, 27 Aug 2026 00:30:00 +0000
+
+isofill (0.3.0) unstable; urgency=medium
+
+  * The second pass no longer carries a value into cells the first pass had no
+    constraint within reach of; they stay zero, as gdal_fillnodata -md leaves
+    them. On alved that takes water beyond the radius from 11.54% to 0.00%.
+  * --barrier widens constraints for the sight test only, not for their values,
+    since a one cell line at 1 arcsecond is a third of the wall it was at 3.
+  * --pass2-tile bounds how far the second pass carries a value. Off by default.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Wed, 26 Aug 2026 23:30:00 +0000
+
+isofill (0.2.0) unstable; urgency=medium
+
+  * Work band by band above --max-mem, so a whole zone at 1 arcsecond fits:
+    the summed area table alone is 42 GB for an 86401x39601 raster.
+  * --mask bounds where cells may be filled, without narrowing what any cell
+    can see, so a zone-wide run no longer invents terrain across unmapped
+    squares.
+  * Default to all but two cores rather than every core.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Wed, 26 Aug 2026 17:00:00 +0000
+
+isofill (0.1.0) unstable; urgency=medium
+
+  * First package. Both passes of the contour fill, in C against GDAL.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Wed, 26 Aug 2026 09:00:00 +0000
