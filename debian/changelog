@@ -1,3 +1,20 @@
+isofill (0.4.0) unstable; urgency=medium
+
+  * The second pass now fills the cells the first pass found nothing for, the
+    same as those it found too little for, and --no-reach is accepted and
+    ignored. This is what the original does: TileUtil's radius_value has one
+    failure return, and finding nothing reaches it exactly as finding too
+    little does. The old split reset those cells to zero after the second
+    pass, copied from gdal_fillnodata -md rather than from TileUtil, and put
+    114,309 cells of zone-tapira at 1 m.
+  * Verified against 0.3.1 run with --no-reach on zone-tapira's constraint
+    raster: 0 differing cells of 51,854,401.
+  * The OUT_OF_REACH sentinel is unchanged and --no-pass2 still writes it
+    through. Telling "saw nothing" from "saw too little" is how the above was
+    found and stays worth having.
+
+ -- Lee Kindness <lee.kindness@inovageo.com>  Sun, 30 Aug 2026 23:34:39 +0100
+
 isofill (0.3.1) unstable; urgency=medium
 
   * Fix an out of memory on wide zones. The windowed second pass sized its
