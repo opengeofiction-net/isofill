@@ -60,8 +60,17 @@
 /*
  * A cell with no constraint at all within the radius. Distinct from NO_ELEV,
  * which is a cell the first pass looked at and declined: this one it never had
- * anything to look at. Both are unset for the second pass, but this one takes
- * no value from it - see --reach.
+ * anything to look at.
+ *
+ * The second pass fills both alike, which is what the original does - TileUtil's
+ * radius_value has a single failure return, and finding nothing falls through to
+ * it exactly as finding too little does. Until August 2026 this one was reset to
+ * zero afterwards, copying gdal_fillnodata -md rather than the implementation
+ * this reproduces, and that put 114,309 cells of zone-tapira at 1 m.
+ *
+ * The distinction is still recorded, because it is worth being able to see:
+ * --no-pass2 writes these sentinels through, and telling "saw nothing" from
+ * "saw too little" is how that fault was found.
  */
 #define OUT_OF_REACH (-32767)
 
@@ -411,10 +420,8 @@ static void weighted_linear(short *v, int cols, int rows);
  * 20.
  */
 static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALDatasetH out,
-                        int cols, int rows, int tile, int margin, int reach)
+                        int cols, int rows, int tile, int margin)
 {
-    unsigned char *oor = NULL;
-    size_t orn = 0;
     GDALRasterBandH p1b = GDALGetRasterBand(p1, 1);
     GDALRasterBandH ob = GDALGetRasterBand(out, 1);
     /* the window is as big as the tile allows in each axis - square it and a
@@ -448,18 +455,7 @@ static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALDatasetH out,
 
             IO_(GDALRasterIO(p1b, GF_Read, wx0, wy0, ww, wh, buf, ww, wh,
                              GDT_Int16, 0, 0));
-            if (reach) {
-                size_t k, n = (size_t) ww * wh;
-                if (!oor) { oor = malloc(n); orn = n; }
-                else if (orn < n) { oor = realloc(oor, n); orn = n; }
-                if (!oor) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
-                for (k = 0; k < n; k++) oor[k] = (buf[k] == OUT_OF_REACH);
-            }
             weighted_linear(buf, ww, wh);
-            if (reach) {
-                size_t k, n = (size_t) ww * wh;
-                for (k = 0; k < n; k++) if (oor[k]) buf[k] = 0;
-            }
 
             if (m) {
                 int x;
@@ -478,7 +474,7 @@ static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALDatasetH out,
     }
     fprintf(stderr, "\r  pass 2 complete, %d windows of %d with %d margin\n",
             ((cols + tile - 1) / tile) * ((rows + tile - 1) / tile), tile, margin);
-    free(buf); free(m); free(oor);
+    free(buf); free(m);
 }
 
 /*
@@ -492,7 +488,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
                                const char *tmp_pv,
                                const char *tmp_gv, GDALDatasetH out,
                                int cols, int rows, int strip_w, int chunk_h,
-                               char **opts, int reach)
+                               char **opts)
 {
     GDALRasterBandH p1b = GDALGetRasterBand(p1, 1);
     GDALDatasetH dpv, dgv;
@@ -545,8 +541,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
         short *cpv  = malloc((size_t) cols * chunk_h * sizeof *cpv);
         unsigned char *cgv = malloc((size_t) cols * chunk_h);
         unsigned char *cm = mb ? malloc((size_t) cols * chunk_h) : NULL;
-        unsigned char *co = reach ? malloc((size_t) cols * chunk_h) : NULL;
-        GDALRasterBandH ob = GDALGetRasterBand(out, 1);
+            GDALRasterBandH ob = GDALGetRasterBand(out, 1);
         int y0, h;
 
         if (!cin || !chh || !cgh || !cpv || !cgv) {
@@ -562,12 +557,6 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
                              GDT_Byte, 0, 0));
             if (cm) IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, h, cm, cols, h,
                                      GDT_Byte, 0, 0));
-            /* what the first pass never reached, captured before interp_line
-             * overwrites the chunk - it takes no value from the second pass */
-            if (co) {
-                size_t k, n = (size_t) cols * h;
-                for (k = 0; k < n; k++) co[k] = (cin[k] == OUT_OF_REACH);
-            }
             memset(cgh, 0, (size_t) cols * h * sizeof *cgh);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -580,7 +569,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
                     double dd = cgh[o + xx] + cgv[o + xx] + .01;
                     double dH = (cgh[o + xx] + .005) / dd;
                     double dV = (cgv[o + xx] + .005) / dd;
-                    cin[o + xx] = ((cm && !cm[o + xx]) || (co && co[o + xx]))
+                    cin[o + xx] = (cm && !cm[o + xx])
                         ? 0
                         : (short) floor(dH * chh[o + xx]
                                         + dV * cpv[o + xx] + .5);
@@ -589,7 +578,7 @@ static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
             IO_(GDALRasterIO(ob, GF_Write, 0, y0, cols, h, cin, cols, h,
                              GDT_Int16, 0, 0));
         }
-        free(cin); free(chh); free(cgh); free(cpv); free(cgv); free(cm); free(co);
+        free(cin); free(chh); free(cgh); free(cpv); free(cgv); free(cm);
     }
 
     free(colbuf); free(cout); free(cgrad); free(stripv); free(stripg);
@@ -648,9 +637,8 @@ static void usage(void)
         "  --grad-min F   least gradient, metres per cell, which counts as a\n"
         "                 slope worth interpolating across (default 0.1)\n"
         "  --no-pass2     leave cells the first pass declined unset\n"
-        "  --no-reach     let the second pass carry a value into cells which had\n"
-        "                 no constraint within the radius at all. Those are zero\n"
-        "                 by default, as gdal_fillnodata -md leaves them\n"
+        "  --no-reach     accepted and ignored. It used to switch on what is now\n"
+        "                 the only behaviour; see the note on reach in README.md\n"
         "  --mask FILE    a raster the size of the constraints: where it is zero\n"
         "                 no cell is filled, though contours there still count as\n"
         "                 evidence for cells outside it\n"
@@ -754,7 +742,7 @@ int main(int argc, char **argv)
     const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
     int radius = 20, do_pass2 = 1, threads = 0, i;
     double grad_min = 0.1, max_mem = 4096;
-    int p2_tile = -1, p2_margin = -1, reach = 1, barrier = 1;
+    int p2_tile = -1, p2_margin = -1, barrier = 1;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--radius") && i + 1 < argc) radius = atoi(argv[++i]);
@@ -762,7 +750,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--max-mem") && i + 1 < argc) max_mem = atof(argv[++i]);
         else if (!strcmp(argv[i], "--mask") && i + 1 < argc) mask_path = argv[++i];
         else if (!strcmp(argv[i], "--barrier") && i + 1 < argc) barrier = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--no-reach")) reach = 0;
+        else if (!strcmp(argv[i], "--no-reach")) ;   /* was a switch, now the only behaviour */
         else if (!strcmp(argv[i], "--pass2-tile") && i + 1 < argc) p2_tile = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) p2_margin = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-pass2")) do_pass2 = 0;
@@ -871,7 +859,7 @@ int main(int argc, char **argv)
                                  1, GDT_Int16, opts);
                 GDALSetGeoTransform(dst, gt);
                 GDALSetProjection(dst, GDALGetProjectionRef(src));
-                pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin, reach);
+                pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin);
                 GDALClose(dst); GDALClose(p1); VSIUnlink(tp);
                 free(out);
                 if (msk) GDALClose(msk);
@@ -879,19 +867,7 @@ int main(int argc, char **argv)
                 return 0;
             }
             if (do_pass2) {
-                unsigned char *oor = NULL;
-                if (reach) {
-                    size_t k, n = (size_t) cols * rows;
-                    oor = malloc(n);
-                    if (!oor) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
-                    for (k = 0; k < n; k++) oor[k] = (out[k] == OUT_OF_REACH);
-                }
                 weighted_linear(out, cols, rows);
-                if (oor) {
-                    size_t k, n = (size_t) cols * rows;
-                    for (k = 0; k < n; k++) if (oor[k]) out[k] = 0;
-                    free(oor);
-                }
                 if (mb) {
                     unsigned char *m = malloc((size_t) cols * rows);
                     size_t k, n = (size_t) cols * rows;
@@ -974,9 +950,9 @@ int main(int argc, char **argv)
                 fprintf(stderr, "  pass 2: %d column strips, %d row chunks\n",
                         (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
                 if (p2_tile < (cols > rows ? cols : rows)) {
-                    pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin, reach);
+                    pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin);
                 } else if (!weighted_linear_ooc(p1, mb, t2, t3, dst, cols, rows,
-                                                strip, chunk, opts, reach)) {
+                                                strip, chunk, opts)) {
                     fprintf(stderr, "isofill: pass 2 failed\n");
                 } else {
                     fprintf(stderr, "  pass 2 complete\n");
