@@ -74,6 +74,16 @@
  */
 #define OUT_OF_REACH (-32767)
 
+/*
+ * A cell that saw exactly one elevation - a contour, but nothing to interpolate
+ * against. Distinct from NO_ELEV, which saw a pair and judged it too flat to
+ * trust. The second pass treats all three as unset, so this changes no output;
+ * it separates two populations that want different answers. Of the cells the
+ * first pass declines inside a described area, which of these they are decides
+ * whether a relaxed rule has anything to work with.
+ */
+#define ONE_LEVEL (-32766)
+
 typedef struct {
     short dx, dy;
     float dist;
@@ -366,6 +376,8 @@ static short radius_value(const Band *b, const Rays *r, int radius,
      */
     if (nlev == 0)
         return OUT_OF_REACH;
+    if (nlev == 1)
+        return ONE_LEVEL;
     if (best <= grad_min)
         return NO_ELEV;
     return (short) floor(out + 0.5);
@@ -387,7 +399,8 @@ static void interp_line(const short *in, short *out, short *grad, int n)
     for (i = 0; i <= n; i++) {
         double val = (i < n) ? (double) in[i] : 0.0;
         if (i < n) {
-            if (in[i] == NO_ELEV || in[i] == OUT_OF_REACH)
+            if (in[i] == NO_ELEV || in[i] == OUT_OF_REACH ||
+                in[i] == ONE_LEVEL)
                 continue;
             out[i] = in[i];
             grad[i] = 1;
@@ -728,7 +741,7 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
             }
             v = radius_value(&b, rays, radius, grad_min, barrier, xx, y + margin, NULL);
             out[k] = v;
-            if (v != NO_ELEV && v != OUT_OF_REACH) filled++;
+            if (v != NO_ELEV && v != OUT_OF_REACH && v != ONE_LEVEL) filled++;
         }
     }
 
