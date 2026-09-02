@@ -72,7 +72,7 @@ dropped somewhere and the binary is quietly single threaded.
 | `--water FILE` | a raster the size of the constraints: where it is not zero the cell is water, held at zero by `--pass2 diffuse` |
 | `--pass2 WHICH` | `linear`, the default, or `diffuse`. See below |
 | `--pass2-tile N` | bound the second pass to a window. Default 0, the whole raster |
-| `--max-mem MB` | above this, work band by band. Default 4096 |
+| `--max-mem MB` | above this, work band by band. Default 4096. The two passes decide separately; see below |
 | `--threads N` | default: all but two |
 | `--explain X Y` | say what one cell could see and what it did with it |
 
@@ -149,7 +149,44 @@ N32E067_Ellarca, where the first pass answers a third of the ground: the same
 difference 0 m, 95th percentile 3 m - and the longest run of axis-aligned steps
 falls from 487 cells to 76.
 
-It needs the raster to fit in `--max-mem`; there is no out-of-core solve yet.
+**The two passes decide banding separately**, because the two banded paths are
+not of equal standing. The first pass reads each band with a `--radius` margin,
+so every interior cell still sees its whole search circle and a banded run is
+**exact** - forcing it to band on zone-ellarca while the second pass holds the
+raster gives output identical to the last bit, 100.0000% of cells and a maximum
+difference of 0 m. The second pass banded is an approximation. So where there is
+room for the solve but not for the first pass's summed area table - most of the
+gap, at eight bytes a cell against the solve's seven and a third - it is taken,
+and the exact answer kept.
+
+For OGF that means `--max-mem 20480` puts every zone's second pass in memory:
+the largest, zone-yuethon at 46801 square, wants 19.0 GB for the solve against
+26.5 GB to hold its first pass whole.
+
+Below that it is solved out of core, and **that path is an approximation**. It
+enters the pyramid part way up - the fine rasters are read once and restricted
+straight into a coarse grid that fits - and carries the answer back down in
+bands, each solved with its margin rows held at the coarse answer so
+neighbouring bands agree by construction. `--pass2-margin` sets that overlap.
+
+Measured by forcing zone-ellarca out of core and comparing against itself solved
+whole: 95% of cells identical, 95th percentile 0 m, and a tenth of a percent
+differing by hundreds of metres. Of those, 28% are cells the banded path calls
+void and the whole solve does not - the coarse grid deciding connectivity at 1
+in 4 rather than cell by cell - and the rest is each band solving a different
+problem from the whole raster.
+
+Two things it is **not**, both measured before concluding them. Not the band
+joins: the error away from one averages 5.30 m against 6.45 m within a hundred
+rows of one, and the worst rows are nowhere near a join. And not the overlap:
+widening the margin from 192 rows to 512 changes the output without moving any
+of those figures. A first attempt that only relaxed each band from the coarse
+answer, rather than solving it, was much worse - p99.9 of 1769 m against 586 -
+because relaxation carries information one cell per sweep and the contours here
+are hundreds of cells apart.
+
+So give `--max-mem` the room where you can, and treat the banded second pass as
+a fallback that gets you a map rather than the map.
 
 `--barrier` exists for the same reason from the other direction. A one cell contour
 is a 93 m wall at 3 arcseconds and a 31 m wall at 1, so holding the search distance
