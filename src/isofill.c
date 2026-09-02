@@ -906,12 +906,20 @@ static void solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
         float *fine = (i == 0) ? NULL : malloc(m * sizeof *fine);
         if (i && !fine) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
         if (!fine) {
-            /* the finest level is the caller's array: prolong through a copy */
-            float *tmp = malloc(m * sizeof *tmp);
-            if (!tmp) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
-            diffuse_prolong(z[i + 1], lc[i + 1], lr[i + 1], tmp, lc[i], lr[i]);
-            for (j = 0; j < m; j++) if (!fx[i][j]) z[i][j] = tmp[j];
-            free(tmp);
+            /* the finest level is the caller's array. Prolong into the unknowns
+             * in place: a whole extra copy of it, at four bytes a cell, is the
+             * difference between holding a zone and not */
+            int cy, cx;
+            for (cy = 0; cy < lr[i]; cy++) {
+                int py = cy / 2; if (py >= lr[i + 1]) py = lr[i + 1] - 1;
+                for (cx = 0; cx < lc[i]; cx++) {
+                    size_t k = (size_t) cy * lc[i] + (size_t) cx;
+                    int px = cx / 2; if (px >= lc[i + 1]) px = lc[i + 1] - 1;
+                    if (!fx[i][k])
+                        z[i][k] = z[i + 1][(size_t) py * lc[i + 1] + (size_t) px];
+                }
+            }
+            (void) j;
         } else {
             diffuse_prolong(z[i + 1], lc[i + 1], lr[i + 1], fine, lc[i], lr[i]);
             for (j = 0; j < m; j++) if (fx[i][j]) fine[j] = z[i][j];
@@ -941,6 +949,18 @@ static void classify(const short *v, const unsigned char *water,
     }
 }
 
+/*
+ * What diffuse needs, in megabytes, to hold a raster of this size: the caller's
+ * Int16 buffer, a float and a byte a cell for the solve, and a third again for
+ * the pyramid above it. The out-of-reach and void flags are gone by the time
+ * the pyramid is built, so they do not set the peak.
+ */
+static double diffuse_mb(int cols, int rows)
+{
+    double cells = (double) cols * rows;
+    return (cells * (2.0 + 4.0 + 1.0) * (1.0 + 1.0 / 3.0)) / (1024 * 1024);
+}
+
 static void diffuse(short *v, const unsigned char *water,
                     const unsigned char *mask, int cols, int rows)
 {
@@ -955,10 +975,11 @@ static void diffuse(short *v, const unsigned char *water,
     free(oor);
 
     classify(v, water, mask, vd, z, fx, cells);
+    free(vd);                    /* wanted only while classifying */
     solve_pyramid(z, fx, cols, rows);
     for (k = 0; k < cells; k++) v[k] = (short) floor(z[k] + 0.5);
 
-    free(z); free(fx); free(vd);
+    free(z); free(fx);
 }
 
 /*
@@ -1512,6 +1533,46 @@ int main(int argc, char **argv)
                         (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
                 if (p2_tile < (cols > rows ? cols : rows)) {
                     pass2_tiled(p1, mb, wb, dst, cols, rows, p2_tile, p2_margin);
+                } else if (pass2_diffuse && diffuse_mb(cols, rows) <= max_mem) {
+                    /*
+                     * The first pass banded and the second does not have to.
+                     * They are separate decisions because the two paths are not
+                     * of equal standing: the first pass reads each band with a
+                     * radius margin, so every interior cell sees its whole
+                     * search circle and a banded run is exact. The second pass
+                     * banded is an approximation. So where there is room for
+                     * the solve but not for the first pass's summed-area table
+                     * - which is most of the gap, at eight bytes a cell - take
+                     * it, and keep the exact answer.
+                     */
+                    short *whole = malloc((size_t) cols * rows * sizeof *whole);
+                    unsigned char *wm = NULL, *mm = NULL;
+                    if (!whole) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                    fprintf(stderr, "  pass 2: whole raster, %.0f MB of %.0f\n",
+                            diffuse_mb(cols, rows), max_mem);
+                    IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Read, 0, 0,
+                                     cols, rows, whole, cols, rows, GDT_Int16, 0, 0));
+                    if (wb) {
+                        wm = malloc((size_t) cols * rows);
+                        if (!wm) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                        IO_(GDALRasterIO(wb, GF_Read, 0, 0, cols, rows, wm, cols, rows,
+                                         GDT_Byte, 0, 0));
+                    }
+                    if (mb) {
+                        mm = malloc((size_t) cols * rows);
+                        if (!mm) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                        IO_(GDALRasterIO(mb, GF_Read, 0, 0, cols, rows, mm, cols, rows,
+                                         GDT_Byte, 0, 0));
+                    }
+                    diffuse(whole, wm, mm, cols, rows);
+                    if (mm) {
+                        size_t k, nn = (size_t) cols * rows;
+                        for (k = 0; k < nn; k++) if (!mm[k]) whole[k] = 0;
+                    }
+                    IO_(GDALRasterIO(GDALGetRasterBand(dst, 1), GF_Write, 0, 0,
+                                     cols, rows, whole, cols, rows, GDT_Int16, 0, 0));
+                    free(whole); free(wm); free(mm);
+                    fprintf(stderr, "  pass 2 complete\n");
                 } else if (pass2_diffuse) {
                     diffuse_ooc(GDALGetRasterBand(p1, 1), mb, wb,
                                 GDALGetRasterBand(dst, 1), cols, rows, max_mem,
