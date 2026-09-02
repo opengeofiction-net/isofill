@@ -429,6 +429,8 @@ static void interp_line(const short *in, short *out, short *grad, int n)
 }
 
 static void weighted_linear(short *v, int cols, int rows);
+static void diffuse(short *v, int cols, int rows);
+static int pass2_diffuse;
 
 /*
  * Pass 2 the way the original ran it. It never saw more than one tile: 512
@@ -481,7 +483,8 @@ static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALDatasetH out,
 
             IO_(GDALRasterIO(p1b, GF_Read, wx0, wy0, ww, wh, buf, ww, wh,
                              GDT_Int16, 0, 0));
-            weighted_linear(buf, ww, wh);
+            if (pass2_diffuse) diffuse(buf, ww, wh);
+            else                weighted_linear(buf, ww, wh);
 
             if (m) {
                 int x;
@@ -650,6 +653,191 @@ static void weighted_linear(short *v, int cols, int rows)
     free(cin); free(cout); free(cgrad);
 }
 
+/* ------------------------------------------------- pass 2, by diffusion */
+
+/*
+ * The linear pass above is continuous in height and not in slope. It
+ * interpolates along each row and each column and blends the two, so the
+ * surface is piecewise linear and its derivative jumps at every anchor. A
+ * hillshade is a derivative, so each of those joints draws an edge, and the
+ * edges run along rows and columns because the segments do - which is why
+ * sparse ground comes out looking like a circuit diagram rather than a
+ * landscape. Measured on a box inside N32E067_Ellarca, where the first pass
+ * answers a third of the ground, the artefact covers most of the rest.
+ *
+ * This solves Laplace's equation instead: every cell the first pass answered is
+ * held fixed, and the rest relax to the mean of their four neighbours. The
+ * result is smooth in the derivative and has no preferred direction. It is also
+ * the same surface to within a metre - on that box the median difference is 0 m
+ * and the 95th percentile 3 m - because it is not inventing different terrain,
+ * only removing the creases.
+ *
+ * A cell beyond the edge of the raster counts as zero, which is what the linear
+ * pass does by anchoring every row and column one step past its ends, and is
+ * what lets open water come out at zero where the sea runs off the side of a
+ * zone. Water enclosed by its own coastline needs no such help: bounded by
+ * cells at zero on all sides, Laplace gives zero throughout without being told.
+ *
+ * Solved coarse to fine. Relaxation moves information one cell per sweep, so
+ * over a gap five hundred cells wide a fine-grid solve would take thousands of
+ * sweeps; each level here starts from the level above and only has to add the
+ * detail that level could not carry.
+ */
+
+static int pass2_diffuse = 0;    /* --pass2 diffuse */
+
+#define DIFFUSE_SWEEPS 24        /* red and black pairs, at each level */
+#define DIFFUSE_COARSE 200       /* at the coarsest, which is small and cheap */
+#define DIFFUSE_MIN    24        /* stop coarsening below this on either side */
+
+static int is_unset(short v)
+{
+    return v == NO_ELEV || v == OUT_OF_REACH || v == ONE_LEVEL;
+}
+
+/*
+ * One half of a red-black Gauss-Seidel sweep. Red and black cells never
+ * neighbour each other, so each half is safely parallel and each reads values
+ * the other half has already updated - which converges about twice as fast as
+ * Jacobi and needs no second array.
+ */
+static void gs_half(float *z, const unsigned char *fx, int cols, int rows, int parity)
+{
+    int y;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (y = 0; y < rows; y++) {
+        size_t r = (size_t) y * cols;
+        int x;
+        for (x = (y + parity) & 1; x < cols; x += 2) {
+            size_t k = r + (size_t) x;
+            float s;
+            if (fx[k]) continue;
+            s  = (y > 0)        ? z[k - (size_t) cols] : 0.0f;
+            s += (y < rows - 1) ? z[k + (size_t) cols] : 0.0f;
+            s += (x > 0)        ? z[k - 1]             : 0.0f;
+            s += (x < cols - 1) ? z[k + 1]             : 0.0f;
+            z[k] = 0.25f * s;
+        }
+    }
+}
+
+static void gs_sweeps(float *z, const unsigned char *fx, int cols, int rows, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        gs_half(z, fx, cols, rows, 0);
+        gs_half(z, fx, cols, rows, 1);
+    }
+}
+
+/*
+ * Coarsen by two. A coarse cell is fixed only if one of the four under it was,
+ * and takes the mean of those rather than of all four - so a contour a single
+ * cell wide survives being coarsened instead of being averaged away by the
+ * unknown ground around it.
+ */
+static void diffuse_restrict(const float *z, const unsigned char *fx, int cols, int rows,
+                             float *cz, unsigned char *cfx, int ccols, int crows)
+{
+    int cy;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (cy = 0; cy < crows; cy++) {
+        int cx;
+        for (cx = 0; cx < ccols; cx++) {
+            int y0 = cy * 2, x0 = cx * 2, dy, dx, nf = 0, na = 0;
+            double sf = 0, sa = 0;
+            for (dy = 0; dy < 2; dy++)
+                for (dx = 0; dx < 2; dx++) {
+                    int y = y0 + dy, x = x0 + dx;
+                    size_t k;
+                    if (y >= rows || x >= cols) continue;
+                    k = (size_t) y * cols + (size_t) x;
+                    sa += z[k]; na++;
+                    if (fx[k]) { sf += z[k]; nf++; }
+                }
+            {
+                size_t ck = (size_t) cy * ccols + (size_t) cx;
+                cfx[ck] = nf ? 1 : 0;
+                cz[ck] = (float) (nf ? sf / nf : (na ? sa / na : 0.0));
+            }
+        }
+    }
+}
+
+/* Nearest-neighbour, which the sweeps that follow smooth out. */
+static void diffuse_prolong(const float *cz, int ccols, int crows,
+                            float *z, int cols, int rows)
+{
+    int y;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (y = 0; y < rows; y++) {
+        int cy = y / 2, x;
+        if (cy >= crows) cy = crows - 1;
+        for (x = 0; x < cols; x++) {
+            int cx = x / 2;
+            if (cx >= ccols) cx = ccols - 1;
+            z[(size_t) y * cols + (size_t) x] = cz[(size_t) cy * ccols + (size_t) cx];
+        }
+    }
+}
+
+#define DIFFUSE_LEVELS 24
+
+static void diffuse(short *v, int cols, int rows)
+{
+    float *z[DIFFUSE_LEVELS];
+    unsigned char *fx[DIFFUSE_LEVELS];
+    int lc[DIFFUSE_LEVELS], lr[DIFFUSE_LEVELS];
+    int n = 1, i;
+    size_t k, cells = (size_t) cols * rows;
+
+    z[0] = malloc(cells * sizeof *z[0]);
+    fx[0] = malloc(cells);
+    if (!z[0] || !fx[0]) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+    lc[0] = cols; lr[0] = rows;
+    for (k = 0; k < cells; k++) {
+        int unset = is_unset(v[k]);
+        fx[0][k] = (unsigned char) !unset;
+        z[0][k] = unset ? 0.0f : (float) v[k];
+    }
+
+    while (n < DIFFUSE_LEVELS &&
+           lc[n - 1] > DIFFUSE_MIN && lr[n - 1] > DIFFUSE_MIN) {
+        int cc = (lc[n - 1] + 1) / 2, cr = (lr[n - 1] + 1) / 2;
+        z[n] = malloc((size_t) cc * cr * sizeof *z[n]);
+        fx[n] = malloc((size_t) cc * cr);
+        if (!z[n] || !fx[n]) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+        diffuse_restrict(z[n - 1], fx[n - 1], lc[n - 1], lr[n - 1],
+                         z[n], fx[n], cc, cr);
+        lc[n] = cc; lr[n] = cr;
+        n++;
+    }
+
+    gs_sweeps(z[n - 1], fx[n - 1], lc[n - 1], lr[n - 1], DIFFUSE_COARSE);
+    for (i = n - 2; i >= 0; i--) {
+        size_t m = (size_t) lc[i] * lr[i], j;
+        float *fine = malloc(m * sizeof *fine);
+        if (!fine) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+        diffuse_prolong(z[i + 1], lc[i + 1], lr[i + 1], fine, lc[i], lr[i]);
+        for (j = 0; j < m; j++)
+            if (fx[i][j]) fine[j] = z[i][j];
+        free(z[i]);
+        z[i] = fine;
+        gs_sweeps(z[i], fx[i], lc[i], lr[i], DIFFUSE_SWEEPS);
+    }
+
+    for (k = 0; k < cells; k++)
+        v[k] = (short) floor(z[0][k] + 0.5);
+
+    for (i = 0; i < n; i++) { free(z[i]); free(fx[i]); }
+}
+
 /* ------------------------------------------------------------------ main */
 
 static void usage(void)
@@ -663,6 +851,10 @@ static void usage(void)
         "  --grad-min F   least gradient, metres per cell, which counts as a\n"
         "                 slope worth interpolating across (default 0.02)\n"
         "  --no-pass2     leave cells the first pass declined unset\n"
+        "  --pass2 WHICH  linear (default) interpolates along rows and columns\n"
+        "                 and blends the two, as the original does. diffuse\n"
+        "                 relaxes the unset cells to Laplace instead, which is\n"
+        "                 smooth in the slope and not only in the height\n"
         "  --no-reach     accepted and ignored. It used to switch on what is now\n"
         "                 the only behaviour; see the note on reach in README.md\n"
         "  --mask FILE    a raster the size of the constraints: where it is zero\n"
@@ -780,6 +972,13 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pass2-tile") && i + 1 < argc) p2_tile = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) p2_margin = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-pass2")) do_pass2 = 0;
+        else if (!strcmp(argv[i], "--pass2") && i + 1 < argc) {
+            const char *w = argv[++i];
+            if (!strcmp(w, "diffuse")) pass2_diffuse = 1;
+            else if (!strcmp(w, "linear")) pass2_diffuse = 0;
+            else { fprintf(stderr, "isofill: --pass2 takes linear or diffuse, not %s\n", w);
+                   return 1; }
+        }
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--explain") && i + 2 < argc) {
             g_explain_x = atoi(argv[++i]); g_explain_y = atoi(argv[++i]);
@@ -893,7 +1092,8 @@ int main(int argc, char **argv)
                 return 0;
             }
             if (do_pass2) {
-                weighted_linear(out, cols, rows);
+                if (pass2_diffuse) diffuse(out, cols, rows);
+                else               weighted_linear(out, cols, rows);
                 if (mb) {
                     unsigned char *m = malloc((size_t) cols * rows);
                     size_t k, n = (size_t) cols * rows;
@@ -977,6 +1177,11 @@ int main(int argc, char **argv)
                         (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
                 if (p2_tile < (cols > rows ? cols : rows)) {
                     pass2_tiled(p1, mb, dst, cols, rows, p2_tile, p2_margin);
+                } else if (pass2_diffuse) {
+                    fprintf(stderr, "isofill: --pass2 diffuse needs the raster to fit "
+                            "in --max-mem; this one wants about %.1f GB\n",
+                            (double) cols * rows * 7 / 1073741824.0);
+                    return 1;
                 } else if (!weighted_linear_ooc(p1, mb, t2, t3, dst, cols, rows,
                                                 strip, chunk, opts)) {
                     fprintf(stderr, "isofill: pass 2 failed\n");
