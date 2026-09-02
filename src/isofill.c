@@ -378,6 +378,19 @@ static short radius_value(const Band *b, const Rays *r, int radius,
         return OUT_OF_REACH;
     if (nlev == 1)
         return ONE_LEVEL;
+    /*
+     * The floor is metres per cell, so what it demands of a pair grows with how
+     * far apart they are: at radius 60 it asks for 6 m of fall, at 120 for 12,
+     * and on gentle ground that rejects pairs which are perfectly good evidence.
+     * It was 0.1 to August 2026, from the original. Measured on the box inside
+     * N32E067_Ellarca, dropping it to 0.02 takes the first pass from 32.71% of
+     * the described area to 36.42% at radius 60, and from 55.86% to 74.82% at
+     * radius 120 - where it was declining 18.95% of the area on this test alone.
+     * Below 0.02 nothing further changes, at either radius.
+     *
+     * The floor wants to be a total drop rather than a rate, or scaled by the
+     * pair's separation. That is the better fix and is not this one.
+     */
     if (best <= grad_min)
         return NO_ELEV;
     return (short) floor(out + 0.5);
@@ -648,7 +661,7 @@ static void usage(void)
         "                 not for their values (default 1). At 1 arcsecond a one\n"
         "                 cell line is a third of the wall it was at 3\n"
         "  --grad-min F   least gradient, metres per cell, which counts as a\n"
-        "                 slope worth interpolating across (default 0.1)\n"
+        "                 slope worth interpolating across (default 0.02)\n"
         "  --no-pass2     leave cells the first pass declined unset\n"
         "  --no-reach     accepted and ignored. It used to switch on what is now\n"
         "                 the only behaviour; see the note on reach in README.md\n"
@@ -754,7 +767,7 @@ int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
     int radius = 20, do_pass2 = 1, threads = 0, i;
-    double grad_min = 0.1, max_mem = 4096;
+    double grad_min = 0.02, max_mem = 4096;
     int p2_tile = -1, p2_margin = -1, barrier = 1;
 
     for (i = 1; i < argc; i++) {

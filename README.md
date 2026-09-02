@@ -65,7 +65,7 @@ dropped somewhere and the binary is quietly single threaded.
 | --- | --- |
 | `--radius N` | how far a cell may look, in cells. Default 20 |
 | `--barrier N` | widen contours for the sight test only, not for their values. Default 1 |
-| `--grad-min F` | the least gradient, in metres per cell, worth interpolating across. Default 0.1 |
+| `--grad-min F` | the least gradient, in metres per cell, worth interpolating across. Default 0.02 |
 | `--mask FILE` | fill only where this raster is non-zero |
 | `--no-reach` | let the second pass carry values past the radius |
 | `--no-pass2` | leave the cells the first pass declined unset |
@@ -75,10 +75,25 @@ dropped somewhere and the binary is quietly single threaded.
 | `--explain X Y` | say what one cell could see and what it did with it |
 
 `--radius` and `--grad-min` carry more weight than their size suggests, and both
-are about a **distance** rather than a cell count. The defaults are the original's,
-set on a 3 arcsecond grid: radius 20 reaches 1,852 m, and 0.1 m per cell is 1.1 m
-per km. On a finer grid scale them, or the fill silently searches a shorter
+are about a **distance** rather than a cell count. The original's were set on a 3
+arcsecond grid: radius 20 reaches 1,852 m, and 0.1 m per cell is 1.1 m per km. On
+a finer grid they have to be scaled, or the fill silently searches a shorter
 distance and refuses gentler slopes than it was tuned to.
+
+`--radius` was scaled when this was written and `--grad-min` was not, which went
+unnoticed until September 2026 because it costs coverage rather than correctness.
+At 1 arcsecond a cell is 31 m, so 1.1 m per km is 0.034 m per cell, and the 0.1 it
+kept was asking three times the slope the original did. Measured on a box inside
+N32E067_Ellarca, dropping it to **0.02** takes the first pass from 32.71% of the
+described area to 36.42% at radius 60, and from 55.86% to 74.82% at radius 120 -
+where the floor alone was declining 18.95% of the ground. Below 0.02 nothing
+changes at either radius, so that is the default rather than the 0.034 the
+arithmetic gives.
+
+The floor would be better expressed as a total drop, or scaled by the separation
+of the pair it judges: as a rate it asks more of a distant pair than a near one,
+which is backwards, since the distant pair is the one that had to survive more
+ground to be seen at all.
 
 `--barrier` exists for the same reason from the other direction. A one cell contour
 is a 93 m wall at 3 arcseconds and a 31 m wall at 1, so holding the search distance
