@@ -1,7 +1,7 @@
 /*
  * isofill - fill a raster from rasterised contours
  *
- * Two passes, after convert_tile_radius and convert_tile_weighted_linear in
+ * Two passes. The first is convert_tile_radius from
  * original/tile_util.c:
  *
  *   1. for every unset cell, gather the constraints within radius which are in
@@ -398,102 +398,8 @@ static short radius_value(const Band *b, const Rays *r, int radius,
 
 /* ------------------------------------------------------------------ pass 2 */
 
-/*
- * interpolate_linear from the original: known values kept, gaps interpolated,
- * and the line anchored at zero one step beyond each end - valP starts 0 at
- * index -1, and the walk runs one past the end with val 0. That anchoring is
- * what makes open water between two coastlines come out at exactly zero.
- */
-static void interp_line(const short *in, short *out, short *grad, int n)
-{
-    int i, j, idxP = -1;
-    double valP = 0, dd;
-
-    for (i = 0; i <= n; i++) {
-        double val = (i < n) ? (double) in[i] : 0.0;
-        if (i < n) {
-            if (in[i] == NO_ELEV || in[i] == OUT_OF_REACH ||
-                in[i] == ONE_LEVEL)
-                continue;
-            out[i] = in[i];
-            grad[i] = 1;
-        }
-        dd = (val - valP) / (double) (i - idxP);
-        for (j = idxP + 1; j < i; j++) {
-            out[j] = (short) floor(valP + (j - idxP) * dd + 0.5);
-            grad[j] = (short) fabs(floor(dd + 0.5));
-        }
-        idxP = i;
-        valP = val;
-    }
-}
-
-static void weighted_linear(short *v, int cols, int rows);
-
-/*
- * Which of the cells the first pass could not reach are void, and which are
- * pockets.
- *
- * Holding every OUT_OF_REACH cell at zero is too blunt. It suppresses the large
- * empty regions, which is wanted, and also punches a pit into every gap between
- * contours that happens to be wider than the radius, which is not: the fill
- * then ramps from the surrounding contour down to zero across sixty cells, a
- * gradient of a fifth, and hillshades as a dark blob with no relation to the
- * terrain. On zone-ellarca that was worse than the artefact it was fixing.
- *
- * What separates them is not the verdict but where the region reaches. The void
- * runs to the edge of the drawn area - ground the contours never described at
- * all; a pocket is enclosed by ground the first pass answered. That is the same
- * distinction demLandClamp.py draws between the sea and an inland lake, by
- * flooding from the edge and keeping what it reaches.
- *
- * Flooded by scanline sweeps rather than a queue: a queue over a region of a
- * hundred million cells wants more memory than the solve does, while forward
- * and backward sweeps carry a flag the length of a run at a time and converge
- * in a handful of passes on shapes this simple.
- */
-static unsigned char *mark_void(const unsigned char *oor, const unsigned char *mask,
-                                int cols, int rows)
-{
-    unsigned char *vd = calloc((size_t) cols * rows, 1);
-    int y, x, pass, changed;
-    if (!vd) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
-
-    /* seeds: outside the drawn area, and the raster edge, which the linear pass
-     * anchors at zero one step beyond */
-    for (y = 0; y < rows; y++)
-        for (x = 0; x < cols; x++) {
-            size_t k = (size_t) y * cols + (size_t) x;
-            if (mask && !mask[k]) vd[k] = 1;
-            else if (oor[k] &&
-                     (y == 0 || x == 0 || y == rows - 1 || x == cols - 1)) vd[k] = 1;
-        }
-
-    for (pass = 0; pass < 64; pass++) {
-        changed = 0;
-        for (y = 0; y < rows; y++)
-            for (x = 0; x < cols; x++) {
-                size_t k = (size_t) y * cols + (size_t) x;
-                if (vd[k] || !oor[k]) continue;
-                if ((x && vd[k - 1]) || (y && vd[k - (size_t) cols]))
-                    { vd[k] = 1; changed = 1; }
-            }
-        for (y = rows - 1; y >= 0; y--)
-            for (x = cols - 1; x >= 0; x--) {
-                size_t k = (size_t) y * cols + (size_t) x;
-                if (vd[k] || !oor[k]) continue;
-                if ((x < cols - 1 && vd[k + 1]) ||
-                    (y < rows - 1 && vd[k + (size_t) cols]))
-                    { vd[k] = 1; changed = 1; }
-            }
-        if (!changed) break;
-    }
-    return vd;
-}
-
 static void diffuse(short *v, const unsigned char *water,
                     const unsigned char *mask, int cols, int rows);
-static int pass2_diffuse;
 
 /*
  * Pass 2 the way the original ran it. It never saw more than one tile: 512
@@ -510,82 +416,6 @@ static int pass2_diffuse;
  * resolution - the original's 512 and 128 are 25.6 and 6.4 times its radius of
  * 20.
  */
-static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALRasterBandH wbp,
-                        GDALDatasetH out,
-                        int cols, int rows, int tile, int margin)
-{
-    GDALRasterBandH p1b = GDALGetRasterBand(p1, 1);
-    GDALRasterBandH ob = GDALGetRasterBand(out, 1);
-    /* the window is as big as the tile allows in each axis - square it and a
-     * whole-raster tile on a wide zone asks for the long side twice */
-    int ww_max = (tile < cols ? tile : cols) + 2 * margin;
-    int wh_max = (tile < rows ? tile : rows) + 2 * margin;
-    short *buf = malloc((size_t) ww_max * wh_max * sizeof *buf);
-    unsigned char *m = mb ? malloc((size_t) tile * tile) : NULL;
-    int tx, ty;
-
-    if (!buf || (mb && !m)) {
-        fprintf(stderr, "isofill: out of memory for a %dx%d pass 2 window\n",
-                ww_max, wh_max);
-        exit(1);
-    }
-
-    for (ty = 0; ty < rows; ty += tile) {
-        for (tx = 0; tx < cols; tx += tile) {
-            int w = (tx + tile <= cols) ? tile : cols - tx;
-            int h = (ty + tile <= rows) ? tile : rows - ty;
-            int wx0 = tx - margin, wy0 = ty - margin;
-            int wx1 = tx + w + margin, wy1 = ty + h + margin;
-            int ww, wh, ox, oy, y;
-
-            if (wx0 < 0) wx0 = 0;
-            if (wy0 < 0) wy0 = 0;
-            if (wx1 > cols) wx1 = cols;
-            if (wy1 > rows) wy1 = rows;
-            ww = wx1 - wx0; wh = wy1 - wy0;
-            ox = tx - wx0; oy = ty - wy0;
-
-            IO_(GDALRasterIO(p1b, GF_Read, wx0, wy0, ww, wh, buf, ww, wh,
-                             GDT_Int16, 0, 0));
-            if (pass2_diffuse) {
-                unsigned char *wbuf = NULL, *mbuf = NULL;
-                if (wbp) {
-                    wbuf = malloc((size_t) ww * wh);
-                    if (!wbuf) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
-                    IO_(GDALRasterIO(wbp, GF_Read, wx0, wy0, ww, wh, wbuf, ww, wh,
-                                     GDT_Byte, 0, 0));
-                }
-                if (mb) {
-                    mbuf = malloc((size_t) ww * wh);
-                    if (!mbuf) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
-                    IO_(GDALRasterIO(mb, GF_Read, wx0, wy0, ww, wh, mbuf, ww, wh,
-                                     GDT_Byte, 0, 0));
-                }
-                diffuse(buf, wbuf, mbuf, ww, wh);
-                free(wbuf); free(mbuf);
-            } else {
-                weighted_linear(buf, ww, wh);
-            }
-
-            if (m) {
-                int x;
-                IO_(GDALRasterIO(mb, GF_Read, tx, ty, w, h, m, w, h,
-                                 GDT_Byte, 0, 0));
-                for (y = 0; y < h; y++)
-                    for (x = 0; x < w; x++)
-                        if (!m[(size_t) y * w + x])
-                            buf[(size_t) (oy + y) * ww + ox + x] = 0;
-            }
-            IO_(GDALRasterIO(ob, GF_Write, tx, ty, w, h,
-                             buf + (size_t) oy * ww + ox, w, h, GDT_Int16,
-                             sizeof *buf, (GSpacing) ww * sizeof *buf));
-        }
-        fprintf(stderr, "\r  pass 2 %d%%", (int) (100.0 * (ty + tile) / rows));
-    }
-    fprintf(stderr, "\r  pass 2 complete, %d windows of %d with %d margin\n",
-            ((cols + tile - 1) / tile) * ((rows + tile - 1) / tile), tile, margin);
-    free(buf); free(m);
-}
 
 /*
  * Pass 2 over a raster too large to hold. The column interpolation needs whole
@@ -594,145 +424,7 @@ static void pass2_tiled(GDALDatasetH p1, GDALRasterBandH mb, GDALRasterBandH wbp
  * Only the column results are stored - a row is interpolated in memory as it is
  * combined.
  */
-static int weighted_linear_ooc(GDALDatasetH p1, GDALRasterBandH mb,
-                               const char *tmp_pv,
-                               const char *tmp_gv, GDALDatasetH out,
-                               int cols, int rows, int strip_w, int chunk_h,
-                               char **opts)
-{
-    GDALRasterBandH p1b = GDALGetRasterBand(p1, 1);
-    GDALDatasetH dpv, dgv;
-    GDALRasterBandH bpv, bgv;
-    short *colbuf, *cout, *cgrad, *stripv;
-    unsigned char *stripg;
-    int x, y, x0, n, ok = 1;
 
-    dpv = GDALCreate(GDALGetDriverByName("GTiff"), tmp_pv, cols, rows, 1,
-                     GDT_Int16, opts);
-    dgv = GDALCreate(GDALGetDriverByName("GTiff"), tmp_gv, cols, rows, 1,
-                     GDT_Byte, opts);
-    if (!dpv || !dgv) return 0;
-    bpv = GDALGetRasterBand(dpv, 1);
-    bgv = GDALGetRasterBand(dgv, 1);
-
-    colbuf = malloc((size_t) rows * sizeof *colbuf);
-    cout   = malloc((size_t) rows * sizeof *cout);
-    cgrad  = malloc((size_t) rows * sizeof *cgrad);
-    stripv = malloc((size_t) rows * strip_w * sizeof *stripv);
-    stripg = malloc((size_t) rows * strip_w);
-
-    for (x0 = 0; x0 < cols; x0 += strip_w) {
-        n = (x0 + strip_w <= cols) ? strip_w : cols - x0;
-        if (GDALRasterIO(p1b, GF_Read, x0, 0, n, rows, stripv, n, rows,
-                         GDT_Int16, 0, 0) != CE_None) { ok = 0; break; }
-        for (x = 0; x < n; x++) {
-            for (y = 0; y < rows; y++) colbuf[y] = stripv[(size_t) y * n + x];
-            memset(cgrad, 0, (size_t) rows * sizeof *cgrad);
-            interp_line(colbuf, cout, cgrad, rows);
-            for (y = 0; y < rows; y++) {
-                stripv[(size_t) y * n + x] = cout[y];
-                stripg[(size_t) y * n + x] =
-                    (unsigned char) (cgrad[y] > 255 ? 255 : cgrad[y]);
-            }
-        }
-        IO_(GDALRasterIO(bpv, GF_Write, x0, 0, n, rows, stripv, n, rows, GDT_Int16, 0, 0));
-        IO_(GDALRasterIO(bgv, GF_Write, x0, 0, n, rows, stripg, n, rows, GDT_Byte, 0, 0));
-    }
-
-    if (ok) {
-        /*
-         * Combine in chunks of rows rather than single rows. The temporaries
-         * are tiled, so a one row read would fetch and discard a whole tile
-         * row of each - the chunk is what makes reading them back sequential.
-         */
-        short *cin  = malloc((size_t) cols * chunk_h * sizeof *cin);
-        short *chh  = malloc((size_t) cols * chunk_h * sizeof *chh);
-        short *cgh  = malloc((size_t) cols * chunk_h * sizeof *cgh);
-        short *cpv  = malloc((size_t) cols * chunk_h * sizeof *cpv);
-        unsigned char *cgv = malloc((size_t) cols * chunk_h);
-        unsigned char *cm = mb ? malloc((size_t) cols * chunk_h) : NULL;
-            GDALRasterBandH ob = GDALGetRasterBand(out, 1);
-        int y0, h;
-
-        if (!cin || !chh || !cgh || !cpv || !cgv) {
-            fprintf(stderr, "isofill: out of memory\n"); exit(1);
-        }
-        for (y0 = 0; y0 < rows; y0 += chunk_h) {
-            h = (y0 + chunk_h <= rows) ? chunk_h : rows - y0;
-            IO_(GDALRasterIO(p1b, GF_Read, 0, y0, cols, h, cin, cols, h,
-                             GDT_Int16, 0, 0));
-            IO_(GDALRasterIO(bpv, GF_Read, 0, y0, cols, h, cpv, cols, h,
-                             GDT_Int16, 0, 0));
-            IO_(GDALRasterIO(bgv, GF_Read, 0, y0, cols, h, cgv, cols, h,
-                             GDT_Byte, 0, 0));
-            if (cm) IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, h, cm, cols, h,
-                                     GDT_Byte, 0, 0));
-            memset(cgh, 0, (size_t) cols * h * sizeof *cgh);
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-            for (y = 0; y < h; y++) {
-                size_t o = (size_t) y * cols;
-                int xx;
-                interp_line(cin + o, chh + o, cgh + o, cols);
-                for (xx = 0; xx < cols; xx++) {
-                    double dd = cgh[o + xx] + cgv[o + xx] + .01;
-                    double dH = (cgh[o + xx] + .005) / dd;
-                    double dV = (cgv[o + xx] + .005) / dd;
-                    cin[o + xx] = (cm && !cm[o + xx])
-                        ? 0
-                        : (short) floor(dH * chh[o + xx]
-                                        + dV * cpv[o + xx] + .5);
-                }
-            }
-            IO_(GDALRasterIO(ob, GF_Write, 0, y0, cols, h, cin, cols, h,
-                             GDT_Int16, 0, 0));
-        }
-        free(cin); free(chh); free(cgh); free(cpv); free(cgv); free(cm);
-    }
-
-    free(colbuf); free(cout); free(cgrad); free(stripv); free(stripg);
-    GDALClose(dpv); GDALClose(dgv);
-    return ok;
-}
-
-static void weighted_linear(short *v, int cols, int rows)
-{
-    short *ph = malloc((size_t) cols * rows * sizeof *ph);
-    short *pv = malloc((size_t) cols * rows * sizeof *pv);
-    short *gh = calloc((size_t) cols * rows, sizeof *gh);
-    short *gv = calloc((size_t) cols * rows, sizeof *gv);
-    short *cin = calloc((size_t) rows, sizeof *cin);
-    short *cout = malloc((size_t) rows * sizeof *cout);
-    short *cgrad = malloc((size_t) rows * sizeof *cgrad);
-    if (!cin || !cout || !cgrad) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
-    int x, y;
-
-    for (y = 0; y < rows; y++)
-        interp_line(v + (size_t) y * cols, ph + (size_t) y * cols,
-                    gh + (size_t) y * cols, cols);
-
-    for (x = 0; x < cols; x++) {
-        for (y = 0; y < rows; y++) cin[y] = v[(size_t) y * cols + x];
-        memset(cgrad, 0, rows * sizeof *cgrad);
-        interp_line(cin, cout, cgrad, rows);
-        for (y = 0; y < rows; y++) {
-            pv[(size_t) y * cols + x] = cout[y];
-            gv[(size_t) y * cols + x] = cgrad[y];
-        }
-    }
-
-    for (y = 0; y < rows; y++)
-        for (x = 0; x < cols; x++) {
-            size_t k = (size_t) y * cols + x;
-            double dd = gh[k] + gv[k] + .01;
-            double dH = (gh[k] + .005) / dd, dV = (gv[k] + .005) / dd;
-            v[k] = (short) floor(dH * ph[k] + dV * pv[k] + .5);
-        }
-
-    free(ph); free(pv); free(gh); free(gv);
-    free(cin); free(cout); free(cgrad);
-}
 
 /* ------------------------------------------------- pass 2, by diffusion */
 
@@ -764,8 +456,6 @@ static void weighted_linear(short *v, int cols, int rows)
  * sweeps; each level here starts from the level above and only has to add the
  * detail that level could not carry.
  */
-
-static int pass2_diffuse = 0;    /* --pass2 diffuse */
 
 
 #define DIFFUSE_SWEEPS 24        /* red and black pairs, at each level */
@@ -874,6 +564,67 @@ static void diffuse_prolong(const float *cz, int ccols, int crows,
 }
 
 #define DIFFUSE_LEVELS 24
+
+/*
+ * Which of the cells the first pass could not reach are void, and which are
+ * pockets.
+ *
+ * Holding every OUT_OF_REACH cell at zero is too blunt. It suppresses the large
+ * empty regions, which is wanted, and also punches a pit into every gap between
+ * contours that happens to be wider than the radius, which is not: the fill
+ * then ramps from the surrounding contour down to zero across sixty cells, a
+ * gradient of a fifth, and hillshades as a dark blob with no relation to the
+ * terrain. On zone-ellarca that was worse than the artefact it was fixing.
+ *
+ * What separates them is not the verdict but where the region reaches. The void
+ * runs to the edge of the drawn area - ground the contours never described at
+ * all; a pocket is enclosed by ground the first pass answered. That is the same
+ * distinction demLandClamp.py draws between the sea and an inland lake, by
+ * flooding from the edge and keeping what it reaches.
+ *
+ * Flooded by scanline sweeps rather than a queue: a queue over a region of a
+ * hundred million cells wants more memory than the solve does, while forward
+ * and backward sweeps carry a flag the length of a run at a time and converge
+ * in a handful of passes on shapes this simple.
+ */
+static unsigned char *mark_void(const unsigned char *oor, const unsigned char *mask,
+                                int cols, int rows)
+{
+    unsigned char *vd = calloc((size_t) cols * rows, 1);
+    int y, x, pass, changed;
+    if (!vd) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+
+    /* seeds: outside the drawn area, and the raster edge, which the linear pass
+     * anchors at zero one step beyond */
+    for (y = 0; y < rows; y++)
+        for (x = 0; x < cols; x++) {
+            size_t k = (size_t) y * cols + (size_t) x;
+            if (mask && !mask[k]) vd[k] = 1;
+            else if (oor[k] &&
+                     (y == 0 || x == 0 || y == rows - 1 || x == cols - 1)) vd[k] = 1;
+        }
+
+    for (pass = 0; pass < 64; pass++) {
+        changed = 0;
+        for (y = 0; y < rows; y++)
+            for (x = 0; x < cols; x++) {
+                size_t k = (size_t) y * cols + (size_t) x;
+                if (vd[k] || !oor[k]) continue;
+                if ((x && vd[k - 1]) || (y && vd[k - (size_t) cols]))
+                    { vd[k] = 1; changed = 1; }
+            }
+        for (y = rows - 1; y >= 0; y--)
+            for (x = cols - 1; x >= 0; x--) {
+                size_t k = (size_t) y * cols + (size_t) x;
+                if (vd[k] || !oor[k]) continue;
+                if ((x < cols - 1 && vd[k + 1]) ||
+                    (y < rows - 1 && vd[k + (size_t) cols]))
+                    { vd[k] = 1; changed = 1; }
+            }
+        if (!changed) break;
+    }
+    return vd;
+}
 
 /*
  * Solve, given the finest level already classified: z holds the fixed values
@@ -1173,21 +924,16 @@ static void usage(void)
         "                 slope worth interpolating across (default 0.02)\n"
         "  --no-pass2     leave cells the first pass declined unset\n"
         "  --water FILE   a raster the size of the constraints: where it is not\n"
-        "                 zero the cell is water, held at zero by --pass2\n"
-        "                 diffuse so the fill cannot cross it\n"
-        "  --pass2 WHICH  linear (default) interpolates along rows and columns\n"
-        "                 and blends the two, as the original does. diffuse\n"
-        "                 relaxes the unset cells to Laplace instead, which is\n"
-        "                 smooth in the slope and not only in the height\n"
+        "                 zero the cell is water, held at zero by the second\n"
+        "                 pass so the fill cannot cross it\n"
         "  --no-reach     accepted and ignored. It used to switch on what is now\n"
         "                 the only behaviour; see the note on reach in README.md\n"
         "  --mask FILE    a raster the size of the constraints: where it is zero\n"
         "                 no cell is filled, though contours there still count as\n"
         "                 evidence for cells outside it\n"
-        "  --pass2-tile N     second pass window, in cells (default 0, the\n"
-        "                 whole raster). Bounds how far a value carries; the\n"
-        "                 original used 25 * radius\n"
-        "  --pass2-margin N   overlap around each window (default 6 * radius)\n"
+        "  --pass2-margin N   rows of overlap between the second pass's bands\n"
+        "                 when the raster will not fit in --max-mem, each\n"
+        "                 discarded after use (default 6 * radius)\n"
         "  --max-mem MB   above this, work band by band through a temporary\n"
         "                 beside the output (default 4096)\n"
         "  --threads N    (default: all but two, to leave the box usable)\n");
@@ -1285,7 +1031,7 @@ int main(int argc, char **argv)
     const char *water_path = NULL;
     int radius = 20, do_pass2 = 1, threads = 0, i;
     double grad_min = 0.02, max_mem = 4096;
-    int p2_tile = -1, p2_margin = -1, barrier = 1;
+    int p2_margin = -1, barrier = 1;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--radius") && i + 1 < argc) radius = atoi(argv[++i]);
@@ -1295,16 +1041,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--water") && i + 1 < argc) water_path = argv[++i];
         else if (!strcmp(argv[i], "--barrier") && i + 1 < argc) barrier = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-reach")) ;   /* was a switch, now the only behaviour */
-        else if (!strcmp(argv[i], "--pass2-tile") && i + 1 < argc) p2_tile = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) p2_margin = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-pass2")) do_pass2 = 0;
-        else if (!strcmp(argv[i], "--pass2") && i + 1 < argc) {
-            const char *w = argv[++i];
-            if (!strcmp(w, "diffuse")) pass2_diffuse = 1;
-            else if (!strcmp(w, "linear")) pass2_diffuse = 0;
-            else { fprintf(stderr, "isofill: --pass2 takes linear or diffuse, not %s\n", w);
-                   return 1; }
-        }
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--explain") && i + 2 < argc) {
             g_explain_x = atoi(argv[++i]); g_explain_y = atoi(argv[++i]);
@@ -1384,9 +1122,7 @@ int main(int argc, char **argv)
          * option because it is the only thing which bounds how far a value
          * carries when there is no mask to bound it.
          */
-        if (p2_tile < 0) p2_tile = 0;
         if (p2_margin < 0) p2_margin = 6 * radius;
-        if (p2_tile == 0) p2_tile = (cols > rows ? cols : rows);
 
         /* values, mask, output and the summed area table, in megabytes */
         whole_mb = ((double) cols * rows * 5.0
@@ -1408,30 +1144,8 @@ int main(int argc, char **argv)
                                 cols, rows, 0, rows, out);
             fprintf(stderr, "  pass 1 set %lld of %lld cells\n", filled,
                     (long long) cols * rows);
-            if (do_pass2 && p2_tile < (cols > rows ? cols : rows)) {
-                /* the tiled path needs pass 1 back as a raster to window over */
-                char tp[4096];
-                GDALDatasetH p1;
-                snprintf(tp, sizeof tp, "%s.pass1.tif", out_path);
-                p1 = GDALCreate(GDALGetDriverByName("GTiff"), tp, cols, rows, 1,
-                                GDT_Int16, opts);
-                if (!p1) { fprintf(stderr, "isofill: cannot create %s\n", tp); return 1; }
-                IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Write, 0, 0, cols,
-                                 rows, out, cols, rows, GDT_Int16, 0, 0));
-                dst = GDALCreate(GDALGetDriverByName("GTiff"), out_path, cols, rows,
-                                 1, GDT_Int16, opts);
-                GDALSetGeoTransform(dst, gt);
-                GDALSetProjection(dst, GDALGetProjectionRef(src));
-                pass2_tiled(p1, mb, wb, dst, cols, rows, p2_tile, p2_margin);
-                GDALClose(dst); GDALClose(p1); VSIUnlink(tp);
-                free(out);
-                if (msk) GDALClose(msk);
-                if (wat) GDALClose(wat);
-                GDALClose(src); CSLDestroy(opts); rays_free(rays);
-                return 0;
-            }
             if (do_pass2) {
-                if (pass2_diffuse) {
+                {
                     unsigned char *wbuf = NULL, *mbuf = NULL;
                     if (wb) {
                         wbuf = malloc((size_t) cols * rows);
@@ -1447,8 +1161,6 @@ int main(int argc, char **argv)
                     }
                     diffuse(out, wbuf, mbuf, cols, rows);
                     free(wbuf); free(mbuf);
-                } else {
-                    weighted_linear(out, cols, rows);
                 }
                 if (mb) {
                     unsigned char *m = malloc((size_t) cols * rows);
@@ -1531,9 +1243,7 @@ int main(int argc, char **argv)
                 if (chunk > rows) chunk = rows;
                 fprintf(stderr, "  pass 2: %d column strips, %d row chunks\n",
                         (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
-                if (p2_tile < (cols > rows ? cols : rows)) {
-                    pass2_tiled(p1, mb, wb, dst, cols, rows, p2_tile, p2_margin);
-                } else if (pass2_diffuse && diffuse_mb(cols, rows) <= max_mem) {
+                if (diffuse_mb(cols, rows) <= max_mem) {
                     /*
                      * The first pass banded and the second does not have to.
                      * They are separate decisions because the two paths are not
@@ -1573,15 +1283,10 @@ int main(int argc, char **argv)
                                      cols, rows, whole, cols, rows, GDT_Int16, 0, 0));
                     free(whole); free(wm); free(mm);
                     fprintf(stderr, "  pass 2 complete\n");
-                } else if (pass2_diffuse) {
+                } else {
                     diffuse_ooc(GDALGetRasterBand(p1, 1), mb, wb,
                                 GDALGetRasterBand(dst, 1), cols, rows, max_mem,
                                 p2_margin);
-                } else if (!weighted_linear_ooc(p1, mb, t2, t3, dst, cols, rows,
-                                                strip, chunk, opts)) {
-                    fprintf(stderr, "isofill: pass 2 failed\n");
-                } else {
-                    fprintf(stderr, "  pass 2 complete\n");
                 }
             } else {
                 short *row = malloc((size_t) cols * sizeof *row);

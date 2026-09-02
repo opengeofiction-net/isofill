@@ -69,9 +69,8 @@ dropped somewhere and the binary is quietly single threaded.
 | `--mask FILE` | fill only where this raster is non-zero |
 | `--no-reach` | let the second pass carry values past the radius |
 | `--no-pass2` | leave the cells the first pass declined unset |
+| `--pass2-margin N` | rows of overlap between the second pass's bands when the raster will not fit in `--max-mem` |
 | `--water FILE` | a raster the size of the constraints: where it is not zero the cell is water, held at zero by `--pass2 diffuse` |
-| `--pass2 WHICH` | `linear`, the default, or `diffuse`. See below |
-| `--pass2-tile N` | bound the second pass to a window. Default 0, the whole raster |
 | `--max-mem MB` | above this, work band by band. Default 4096. The two passes decide separately; see below |
 | `--threads N` | default: all but two |
 | `--explain X Y` | say what one cell could see and what it did with it |
@@ -99,14 +98,18 @@ ground to be seen at all.
 
 ## The second pass
 
-`--pass2 linear` is the original's: interpolate along every row, along every
-column, and blend the two by gradient. It is continuous in height and **not in
-slope** - the surface is piecewise linear, so its derivative jumps at every
-anchor. A hillshade is a derivative, so each joint draws an edge, and the edges
-run along rows and columns because the segments do. On ground the first pass
-cannot answer, that reads as rectangular blocks rather than as landform.
+The original's second pass interpolated along every row, along every column, and
+blended the two by gradient. It was continuous in height and **not in slope** -
+the surface is piecewise linear, so its derivative jumps at every anchor. A
+hillshade is a derivative, so each joint drew an edge, and the edges ran along
+rows and columns because the segments did. On ground the first pass cannot
+answer that read as rectangular blocks rather than as landform, and no amount of
+the low-pass the pipeline applies to the hillshade removed it: the structures are
+hundreds of cells across and the kernel is five. It was removed in September
+2026, along with `--pass2` and `--pass2-tile`, once the replacement had been
+built on five zones and looked at.
 
-`--pass2 diffuse` solves Laplace's equation instead. Every cell the first pass
+The second pass solves Laplace's equation. Every cell the first pass
 answered is held fixed and the rest relax to the mean of their four neighbours,
 which is smooth in the derivative and has no preferred direction. A cell beyond
 the edge of the raster counts as zero, reproducing the way the linear pass
