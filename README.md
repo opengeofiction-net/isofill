@@ -69,6 +69,7 @@ dropped somewhere and the binary is quietly single threaded.
 | `--mask FILE` | fill only where this raster is non-zero |
 | `--no-reach` | let the second pass carry values past the radius |
 | `--no-pass2` | leave the cells the first pass declined unset |
+| `--water FILE` | a raster the size of the constraints: where it is not zero the cell is water, held at zero by `--pass2 diffuse` |
 | `--pass2 WHICH` | `linear`, the default, or `diffuse`. See below |
 | `--pass2-tile N` | bound the second pass to a window. Default 0, the whole raster |
 | `--max-mem MB` | above this, work band by band. Default 4096 |
@@ -115,7 +116,34 @@ by its own coastline needs no such help: bounded by cells at zero, Laplace gives
 zero throughout.
 
 It is solved coarse to fine, because relaxation moves information one cell per
-sweep and the gaps are hundreds of cells wide. Measured on a box inside
+sweep and the gaps are hundreds of cells wide.
+
+Three sets of cells are held at zero rather than solved for, and each was needed:
+
+* **Outside `--mask`.** The linear pass applies the mask afterwards, by zeroing
+  what falls outside it. Doing the same here lets the solve run on past the edge
+  of the drawn area and then chops the result off at it - on zone-ellarca, a
+  1255 m cliff along the envelope.
+* **`--water`.** The sea is a boundary, not something to solve for.
+* **Out of reach, and connected to ground the contours never described.**
+  Laplace has no notion of running out of information: its interior is a
+  weighted average of its whole boundary, so a large region with no constraints
+  in it takes the mean of everything around. On zone-ellarca that filled 56 km
+  of undescribed ground with a 300 m dome, climbing away from the low contour
+  edge towards the mountains on the far side.
+
+That last one is why it is a flood rather than a rule about the verdict.
+Zeroing *every* `OUT_OF_REACH` cell also punches a pit into each gap between
+contours wider than the radius, and the fill then ramps from the surrounding
+contour to zero across sixty cells - a gradient of a fifth, which hillshades as
+a dark blob unrelated to the terrain, and is worse than the artefact it fixes.
+What separates the two is where the region reaches, not what the first pass
+said about it. See `mark_void`.
+
+Decaying everything towards zero instead - solving (laplacian - lambda) z - was
+tried and abandoned. It cannot tell no data from gentle ground between two
+contours, and at any decay length short enough to suppress the first it flattens
+the second. Measured on a box inside
 N32E067_Ellarca, where the first pass answers a third of the ground: the same
 13.5 s as the linear pass, the same surface to within a metre - median
 difference 0 m, 95th percentile 3 m - and the longest run of axis-aligned steps
