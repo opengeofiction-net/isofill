@@ -112,10 +112,13 @@ The sentinels keep their values rather than becoming NaN. `NO_ELEV`,
 `OUT_OF_REACH` and `ONE_LEVEL` are exactly representable in float and compare
 exactly, so every test that read them still reads them.
 
-It costs disk, more than the extra two bytes suggest: zone-ellarca's DEM is 105
-MB against 11 as Int16, because DEFLATE compresses interleaved float exponents
-and mantissas badly. `PREDICTOR=3`, the floating point predictor, is what the
-type wants and recovers about a tenth of that. It costs nothing in memory - the
+It costs disk, more than the extra two bytes suggest, because DEFLATE compresses
+interleaved float exponents and mantissas badly - zone-ellarca's DEM is 102 MB
+that way against 11 as Int16. This writes `ZSTD`, the same size to within a fifth
+of a percent and faster both ways, and stays **lossless**: this output is the
+input to `demLandClamp.py`, and a lossy intermediate would round twice before
+anything is published. `LERC_ZSTD` belongs on the published DEM, once, where it
+takes the same zone to 42.7 MB at a stated 0.05 m bound. It costs nothing in memory - the
 second pass holds one float array where it used to hold an Int16 buffer *and* a
 float copy of it, so the solve is smaller than before.
 
