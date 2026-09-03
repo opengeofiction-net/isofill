@@ -1,3 +1,36 @@
+isofill (0.5.0) unstable; urgency=medium
+
+  * Elevations are floats. Both passes worked in short and whole metres, and
+    both rounded - the first every value it interpolated between two contours,
+    the second everything it filled. A hillshade is a derivative, so that drew
+    a faint ring around every contour and nothing downstream could put back
+    what had been discarded. Output is Float32; the sentinels keep their values
+    rather than becoming NaN, being exactly representable and exactly
+    comparable.
+  * The second pass solves Laplace's equation. The linear pass it replaces
+    interpolated along every row and column and blended the two, which is
+    continuous in height and not in slope: the surface is piecewise linear, so
+    its derivative jumps at every anchor and each joint drew an axis-aligned
+    edge. On ground the first pass cannot answer that read as rectangular
+    blocks rather than as landform. Same runtime, less memory.
+  * The linear pass is gone, with --pass2 and --pass2-tile. Tiling was a linear
+    concern - it bounded how far a value carried along a row - and tiling
+    diffusion would seam.
+  * Three sets of cells are held at zero for the solve: outside --mask, the new
+    --water, and out-of-reach ground that floods to where the contours stop.
+    Laplace has no notion of running out of information, so without the last
+    an unconstrained region takes the mean of its whole boundary.
+  * --grad-min defaults to 0.02, not 0.1. It is a distance like --radius, and
+    was never scaled when the grid went from 3 arcseconds to 1, so it asked
+    three times the slope the original did.
+  * The two passes decide banding separately. A banded first pass is exact; a
+    banded second is an approximation, so where there is room for the solve but
+    not for the first pass's summed area table, it is taken.
+  * Above --max-mem the second pass now has an out-of-core solve rather than
+    refusing. It is an approximation and says so.
+
+ -- Lee Kindness <lee@leekindness.com>  Thu, 03 Sep 2026 14:59:12 +0100
+
 isofill (0.4.0) unstable; urgency=medium
 
   * The second pass now fills the cells the first pass found nothing for, the
