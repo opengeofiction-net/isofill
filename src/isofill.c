@@ -1143,7 +1143,15 @@ int main(int argc, char **argv)
                     + (double) (cols + 1) * (rows + 1) * 8.0) / (1024 * 1024);
 
         opts = CSLSetNameValue(opts, "TILED", "YES");
-        opts = CSLSetNameValue(opts, "COMPRESS", "DEFLATE");
+        /*
+         * ZSTD, not DEFLATE: the same size on this data to within a fifth of a
+         * percent, and faster both ways. Lossless, deliberately - this output
+         * is the input to demLandClamp, and a lossy intermediate would round
+         * twice before anything is published. LERC belongs on the published
+         * DEM, once.
+         */
+        opts = CSLSetNameValue(opts, "COMPRESS", "ZSTD");
+        opts = CSLSetNameValue(opts, "ZSTD_LEVEL", "9");
         /*
          * 3, the floating point predictor, not 2. DEFLATE on raw float bytes
          * compresses badly - the exponent and mantissa interleave into
