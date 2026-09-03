@@ -412,8 +412,8 @@ static elev radius_value(const Band *b, const Rays *r, int radius,
 
 /* ------------------------------------------------------------------ pass 2 */
 
-static void diffuse(elev *v, const unsigned char *water,
-                    const unsigned char *mask, int cols, int rows);
+static void diffuse(elev *v, unsigned char **water, unsigned char **mask,
+                    int cols, int rows);
 
 /*
  * Pass 2 the way the original ran it. It never saw more than one tile: 512
@@ -723,28 +723,50 @@ static void classify(const elev *v, const unsigned char *water,
 static double diffuse_mb(int cols, int rows)
 {
     double cells = (double) cols * rows;
-    return (cells * (2.0 + 4.0 + 1.0) * (1.0 + 1.0 / 3.0)) / (1024 * 1024);
+    /*
+     * The values and the fixed flag, a third again for the pyramid, and the two
+     * mask rasters the caller reads whole and this holds until they have been
+     * classified. Leaving those two out understated zone-axian by 4.2 GB.
+     */
+    return (cells * ((4.0 + 1.0) * (1.0 + 1.0 / 3.0) + 2.0)) / (1024 * 1024);
 }
 
-static void diffuse(elev *v, const unsigned char *water,
-                    const unsigned char *mask, int cols, int rows)
+static void diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
+                    int cols, int rows)
 {
+    const unsigned char *water = waterp ? *waterp : NULL;
+    const unsigned char *mask = maskp ? *maskp : NULL;
     size_t k, cells = (size_t) cols * rows;
     unsigned char *oor = calloc(cells, 1), *vd;
-    float *z = malloc(cells * sizeof *z);
     unsigned char *fx = malloc(cells);
 
-    if (!oor || !z || !fx) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+    if (!oor || !fx) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
     for (k = 0; k < cells; k++) oor[k] = (v[k] == OUT_OF_REACH);
     vd = mark_void(oor, mask, cols, rows);
     free(oor);
 
-    classify(v, water, mask, vd, z, fx, cells);
-    free(vd);                    /* wanted only while classifying */
-    solve_pyramid(z, fx, cols, rows);
-    for (k = 0; k < cells; k++) v[k] = (elev) z[k];
-
-    free(z); free(fx);
+    /*
+     * Solved in place. The caller's array is float and so is the solve, so the
+     * copy this used to make was four bytes a cell of pure waste - on
+     * zone-axian, eight gigabytes of it.
+     */
+    for (k = 0; k < cells; k++) {
+        if ((mask && !mask[k]) || (vd && vd[k]) || (water && water[k])) {
+            fx[k] = 1;
+            v[k] = 0.0f;
+        } else {
+            int unset = is_unset(v[k]);
+            fx[k] = (unsigned char) !unset;
+            if (unset) v[k] = 0.0f;
+        }
+    }
+    /* the masks and the void flags have all been read into fx by now, and the
+     * solve is the largest thing here - let them go before it starts */
+    free(vd);
+    if (waterp) { free(*waterp); *waterp = NULL; }
+    if (maskp)  { free(*maskp);  *maskp  = NULL; }
+    solve_pyramid(v, fx, cols, rows);
+    free(fx);
 }
 
 /*
@@ -779,7 +801,7 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
     /* how far up the pyramid we have to start for the grid to fit */
     for (shift = 1; shift < 8; shift++) {
         double n = ((double) cols / (1 << shift)) * ((double) rows / (1 << shift));
-        if (n * 7.0 <= budget) break;
+        if (n * 12.0 <= budget) break;
     }
     cc = (cols + (1 << shift) - 1) >> shift;
     cr = (rows + (1 << shift) - 1) >> shift;
@@ -848,7 +870,11 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
 
     /* carry it back down, a band of rows at a time */
     {
-        int band_rows = (int) (budget / ((double) cols * 7.0));
+        /* a band holds the values, the solve, the fixed flag, the void flag and
+         * the two masks - twelve bytes a cell with an elev at four, not the
+         * seven this said while an elev was a short */
+        int band_rows = (int) (budget / ((double) cols *
+                        (2.0 * sizeof(elev) + 4.0)));
         int done = 0;
         if (band_rows < 2 * margin) band_rows = 2 * margin;
         free(v); free(mbuf); free(wbuf);
@@ -883,6 +909,9 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
                     vd[k] = (unsigned char) (v[k] == OUT_OF_REACH && cvd[ck]);
                 }
             classify(v, wbuf, mbuf, vd, z, fx, n);
+            /* z is the band's own array here, not the caller's - the band is
+             * read from the raster and written back to it, so there is nothing
+             * to solve in place over */
             /*
              * The band is solved properly, not merely relaxed. Sweeping alone
              * carries information one cell at a time, and in sparse ground the
@@ -1189,7 +1218,7 @@ int main(int argc, char **argv)
                         IO_(GDALRasterIO(mb, GF_Read, 0, 0, cols, rows, mbuf, cols, rows,
                                          GDT_Byte, 0, 0));
                     }
-                    diffuse(out, wbuf, mbuf, cols, rows);
+                    diffuse(out, &wbuf, &mbuf, cols, rows);
                     free(wbuf); free(mbuf);
                 }
                 if (mb) {
@@ -1230,9 +1259,28 @@ int main(int argc, char **argv)
             snprintf(t2, sizeof t2, "%s.pv.tif", out_path);
             snprintf(t3, sizeof t3, "%s.gv.tif", out_path);
 
-            /* rows that fit: values, mask and output at 5 bytes, the table at 8 */
-            per_row = ((double) cols * 5.0 + (double) (cols + 1) * 8.0) / (1024 * 1024);
-            band_rows = (int) (max_mem / per_row) - 2 * radius;
+            /* Rows that fit: the values and the output are an elev each and the
+             * constraint flag a byte, so nine bytes a cell, and the summed area
+             * table eight more. It said five while an elev was a short, and
+             * kept saying it after they became floats - which on zone-axian
+             * banded to 25371 rows where the budget allowed about 19000, and
+             * took the peak to 32.8 GB against a 20 GB limit. */
+            per_row = ((double) cols * (sizeof(elev) + 1.0)
+                       + (double) (cols + 1) * 8.0) / (1024 * 1024);
+            /*
+             * The output array is held whole while the bands go past it, so the
+             * budget for a band is what is left after it - four bytes a cell,
+             * 8.4 GB on zone-axian. Sizing the band to the full budget instead
+             * put the peak at output plus band: 23.5 GB against a stated 15000,
+             * which is where the ratio between what this promises and what the
+             * process actually takes was coming from.
+             */
+            {
+                double out_mb = (double) cols * rows * sizeof(elev) / (1024 * 1024);
+                double avail = max_mem - out_mb;
+                if (avail < max_mem / 4.0) avail = max_mem / 4.0;
+                band_rows = (int) (avail / per_row) - 2 * radius;
+            }
             if (band_rows < 64) band_rows = 64;
             if (band_rows > rows) band_rows = rows;
             fprintf(stderr, "  banding: %d rows at a time, %d bands\n",
@@ -1304,11 +1352,10 @@ int main(int argc, char **argv)
                         IO_(GDALRasterIO(mb, GF_Read, 0, 0, cols, rows, mm, cols, rows,
                                          GDT_Byte, 0, 0));
                     }
-                    diffuse(whole, wm, mm, cols, rows);
-                    if (mm) {
-                        size_t k, nn = (size_t) cols * rows;
-                        for (k = 0; k < nn; k++) if (!mm[k]) whole[k] = 0;
-                    }
+                    diffuse(whole, &wm, &mm, cols, rows);
+                    /* no mask pass afterwards: diffuse fixes the cells outside
+                     * it at zero and the solve never moves a fixed cell, so the
+                     * zeroing the linear path needed is already done */
                     IO_(GDALRasterIO(GDALGetRasterBand(dst, 1), GF_Write, 0, 0,
                                      cols, rows, whole, cols, rows, GDT_Float32, 0, 0));
                     free(whole); free(wm); free(mm);
