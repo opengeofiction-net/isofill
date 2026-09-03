@@ -55,6 +55,20 @@
 #include <omp.h>
 #endif
 
+/*
+ * An elevation, and the working type of both passes. Float since September
+ * 2026: the DEM was whole metres, and the first pass rounded every value it
+ * interpolated between two contours while the second rounded everything it
+ * filled. A hillshade is a derivative, so that quantisation drew a hard ring
+ * around every contour - the terracing - and no amount of smoothing downstream
+ * put back what had already been thrown away.
+ *
+ * The sentinels keep their values rather than becoming NaN. They are exactly
+ * representable, they compare exactly, and every test that read them still
+ * reads them; NaN would have meant rewriting each one as an ordering question.
+ */
+typedef float elev;
+
 #define NO_ELEV (-32768)
 
 /*
@@ -209,7 +223,7 @@ static void rays_free(Rays *r)
 
 typedef struct {
     int rows, cols;
-    short *v;
+    elev *v;
     unsigned char *is;    /* a constraint: carries a value */
     unsigned char *blk;   /* blocks sight: is, widened by --barrier */
     long long *sat;
@@ -297,12 +311,12 @@ static void build_sat(Band *b)
 
 static int g_explain_x = -1, g_explain_y = -1;
 
-static short radius_value(const Band *b, const Rays *r, int radius,
+static elev radius_value(const Band *b, const Rays *r, int radius,
                           double grad_min, int barrier, int x0, int y0,
                           unsigned char *blocked)
 {
     int explain = (x0 == g_explain_x && y0 == g_explain_y);
-    short lev[MAX_LEVELS];
+    elev lev[MAX_LEVELS];
     float dst[MAX_LEVELS];
     int nlev = 0, i, j, k;
     double best = -1e30, out = 0;
@@ -337,7 +351,7 @@ static short radius_value(const Band *b, const Rays *r, int radius,
         if (blk)
             continue;
         {
-            short val = b->v[(size_t) y * b->cols + x];
+            elev val = b->v[(size_t) y * b->cols + x];
             /* nearest-first, so an elevation already seen is already nearer */
             for (k = 0; k < nlev; k++)
                 if (lev[k] == val) break;
@@ -346,7 +360,7 @@ static short radius_value(const Band *b, const Rays *r, int radius,
                 dst[nlev] = o->dist;
                 nlev++;
                 if (explain)
-                    fprintf(stderr, "    sees %6d m at %6.2f cells, offset %+d%+d\n",
+                    fprintf(stderr, "    sees %8.2f m at %6.2f cells, offset %+d%+d\n",
                             val, o->dist, o->dx, o->dy);
             }
         }
@@ -393,12 +407,12 @@ static short radius_value(const Band *b, const Rays *r, int radius,
      */
     if (best <= grad_min)
         return NO_ELEV;
-    return (short) floor(out + 0.5);
+    return (elev) out;
 }
 
 /* ------------------------------------------------------------------ pass 2 */
 
-static void diffuse(short *v, const unsigned char *water,
+static void diffuse(elev *v, const unsigned char *water,
                     const unsigned char *mask, int cols, int rows);
 
 /*
@@ -462,7 +476,7 @@ static void diffuse(short *v, const unsigned char *water,
 #define DIFFUSE_COARSE 200       /* at the coarsest, which is small and cheap */
 #define DIFFUSE_MIN    24        /* stop coarsening below this on either side */
 
-static int is_unset(short v)
+static int is_unset(elev v)
 {
     return v == NO_ELEV || v == OUT_OF_REACH || v == ONE_LEVEL;
 }
@@ -683,7 +697,7 @@ static void solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
 }
 
 /* Which cells are held, and at what. */
-static void classify(const short *v, const unsigned char *water,
+static void classify(const elev *v, const unsigned char *water,
                      const unsigned char *mask, const unsigned char *vd,
                      float *z, unsigned char *fx, size_t cells)
 {
@@ -712,7 +726,7 @@ static double diffuse_mb(int cols, int rows)
     return (cells * (2.0 + 4.0 + 1.0) * (1.0 + 1.0 / 3.0)) / (1024 * 1024);
 }
 
-static void diffuse(short *v, const unsigned char *water,
+static void diffuse(elev *v, const unsigned char *water,
                     const unsigned char *mask, int cols, int rows)
 {
     size_t k, cells = (size_t) cols * rows;
@@ -728,7 +742,7 @@ static void diffuse(short *v, const unsigned char *water,
     classify(v, water, mask, vd, z, fx, cells);
     free(vd);                    /* wanted only while classifying */
     solve_pyramid(z, fx, cols, rows);
-    for (k = 0; k < cells; k++) v[k] = (short) floor(z[k] + 0.5);
+    for (k = 0; k < cells; k++) v[k] = (elev) z[k];
 
     free(z); free(fx);
 }
@@ -758,7 +772,7 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
     size_t ccells;
     float *cz;
     unsigned char *cfx, *cvd, *coor, *cout_of_mask;
-    short *v;
+    elev *v;
     unsigned char *mbuf = NULL, *wbuf = NULL;
     double budget = max_mem * 1024.0 * 1024.0 * 0.45;
 
@@ -801,7 +815,7 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
         }
         for (y = 0; y < rows; y += step) {
             int h = (y + step <= rows) ? step : rows - y, yy;
-            IO_(GDALRasterIO(p1b, GF_Read, 0, y, cols, h, v, cols, h, GDT_Int16, 0, 0));
+            IO_(GDALRasterIO(p1b, GF_Read, 0, y, cols, h, v, cols, h, GDT_Float32, 0, 0));
             if (mb) IO_(GDALRasterIO(mb, GF_Read, 0, y, cols, h, mbuf, cols, h, GDT_Byte, 0, 0));
             if (wb) IO_(GDALRasterIO(wb, GF_Read, 0, y, cols, h, wbuf, cols, h, GDT_Byte, 0, 0));
             for (yy = 0; yy < h; yy++) {
@@ -856,7 +870,7 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
             if (!v || !z || !fx || !vd || (mb && !mbuf) || (wb && !wbuf)) {
                 fprintf(stderr, "isofill: out of memory for a pass 2 band\n"); exit(1);
             }
-            IO_(GDALRasterIO(p1b, GF_Read, 0, y0, cols, bh, v, cols, bh, GDT_Int16, 0, 0));
+            IO_(GDALRasterIO(p1b, GF_Read, 0, y0, cols, bh, v, cols, bh, GDT_Float32, 0, 0));
             if (mb) IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, bh, mbuf, cols, bh, GDT_Byte, 0, 0));
             if (wb) IO_(GDALRasterIO(wb, GF_Read, 0, y0, cols, bh, wbuf, cols, bh, GDT_Byte, 0, 0));
 
@@ -896,10 +910,10 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
             for (y = 0; y < h; y++)
                 for (x = 0; x < cols; x++) {
                     size_t k = (size_t) (oy + y) * cols + (size_t) x;
-                    v[k] = (short) floor(z[k] + 0.5);
+                    v[k] = (elev) z[k];
                 }
             IO_(GDALRasterIO(ob, GF_Write, 0, band, cols, h,
-                             v + (size_t) oy * cols, cols, h, GDT_Int16, 0, 0));
+                             v + (size_t) oy * cols, cols, h, GDT_Float32, 0, 0));
             free(v); free(z); free(fx); free(vd); free(mbuf); free(wbuf);
             done += h;
             fprintf(stderr, "\r  pass 2 %d%%", (int) (100.0 * done / rows));
@@ -951,7 +965,7 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
                             const Rays *rays, int radius,
                             double grad_min, int barrier, int has_nd, double nd,
                             int cols, int rows, int y0, int h,
-                            short *out)
+                            elev *out)
 {
     unsigned char *mask = NULL;
     int top = y0 - radius, bot = y0 + h + radius;
@@ -969,13 +983,13 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
     b.is = malloc((size_t) cols * bh);
     if (!b.v || !b.is) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
     if (GDALRasterIO(sb, GF_Read, 0, top, cols, bh, b.v, cols, bh,
-                     GDT_Int16, 0, 0) != CE_None) {
+                     GDT_Float32, 0, 0) != CE_None) {
         fprintf(stderr, "isofill: read failed\n"); exit(1);
     }
     {
         size_t k, n = (size_t) cols * bh;
         for (k = 0; k < n; k++) {
-            int isc = has_nd ? (b.v[k] != (short) nd) : (b.v[k] != NO_ELEV);
+            int isc = has_nd ? (b.v[k] != (elev) nd) : (b.v[k] != NO_ELEV);
             b.is[k] = (unsigned char) isc;
             if (!isc) b.v[k] = NO_ELEV;
         }
@@ -1002,7 +1016,7 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
         int xx;
         for (xx = 0; xx < cols; xx++) {
             size_t k = (size_t) y * cols + xx;
-            short v;
+            elev v;
             if (mask && !mask[k]) {
                 /*
                  * Outside the mask, invent nothing - but a constraint drawn
@@ -1130,7 +1144,15 @@ int main(int argc, char **argv)
 
         opts = CSLSetNameValue(opts, "TILED", "YES");
         opts = CSLSetNameValue(opts, "COMPRESS", "DEFLATE");
-        opts = CSLSetNameValue(opts, "PREDICTOR", "2");
+        /*
+         * 3, the floating point predictor, not 2. DEFLATE on raw float bytes
+         * compresses badly - the exponent and mantissa interleave into
+         * something close to noise - and zone-ellarca's DEM came out at 116 MB
+         * against 11 for the Int16 it replaced, ten times rather than the two
+         * the extra bytes account for. The float predictor separates the bytes
+         * of each value before deflating, which is what the type needs.
+         */
+        opts = CSLSetNameValue(opts, "PREDICTOR", "3");
         opts = CSLSetNameValue(opts, "BIGTIFF", "IF_SAFER");
 
         fprintf(stderr, "  %dx%d, radius %d, %d rays, %.0f MB whole (limit %.0f)\n",
@@ -1138,7 +1160,7 @@ int main(int argc, char **argv)
 
         if (whole_mb <= max_mem) {
             /* small enough to hold: one band, one write, pass 2 in memory */
-            short *out = malloc((size_t) cols * rows * sizeof *out);
+            elev *out = malloc((size_t) cols * rows * sizeof *out);
             if (!out) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
             filled = pass1_band(sb, mb, rays, radius, grad_min, barrier, has_nd, nd,
                                 cols, rows, 0, rows, out);
@@ -1174,13 +1196,13 @@ int main(int argc, char **argv)
                 fprintf(stderr, "  pass 2 complete\n");
             }
             dst = GDALCreate(GDALGetDriverByName("GTiff"), out_path, cols, rows, 1,
-                             GDT_Int16, opts);
+                             GDT_Float32, opts);
             GDALSetGeoTransform(dst, gt);
             GDALSetProjection(dst, GDALGetProjectionRef(src));
             if (!do_pass2)
                 GDALSetRasterNoDataValue(GDALGetRasterBand(dst, 1), NO_ELEV);
             if (GDALRasterIO(GDALGetRasterBand(dst, 1), GF_Write, 0, 0, cols, rows,
-                             out, cols, rows, GDT_Int16, 0, 0) != CE_None)
+                             out, cols, rows, GDT_Float32, 0, 0) != CE_None)
                 fprintf(stderr, "isofill: write failed\n");
             GDALClose(dst);
             free(out);
@@ -1193,7 +1215,7 @@ int main(int argc, char **argv)
             char t1[4096], t2[4096], t3[4096];
             GDALDatasetH p1;
             int h, y0, band_rows;
-            short *out;
+            elev *out;
             double per_row;
 
             snprintf(t1, sizeof t1, "%s.pass1.tif", out_path);
@@ -1209,7 +1231,7 @@ int main(int argc, char **argv)
                     band_rows, (rows + band_rows - 1) / band_rows);
 
             p1 = GDALCreate(GDALGetDriverByName("GTiff"), t1, cols, rows, 1,
-                            GDT_Int16, opts);
+                            GDT_Float32, opts);
             if (!p1) { fprintf(stderr, "isofill: cannot create %s\n", t1); return 1; }
             out = malloc((size_t) cols * band_rows * sizeof *out);
             if (!out) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
@@ -1219,7 +1241,7 @@ int main(int argc, char **argv)
                 filled += pass1_band(sb, mb, rays, radius, grad_min, barrier, has_nd, nd,
                                      cols, rows, y0, h, out);
                 IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Write, 0, y0, cols, h,
-                                 out, cols, h, GDT_Int16, 0, 0));
+                                 out, cols, h, GDT_Float32, 0, 0));
                 fprintf(stderr, "\r  pass 1 %d%%", (int) (100.0 * (y0 + h) / rows));
             }
             free(out);
@@ -1227,7 +1249,7 @@ int main(int argc, char **argv)
                     (long long) cols * rows);
 
             dst = GDALCreate(GDALGetDriverByName("GTiff"), out_path, cols, rows, 1,
-                             GDT_Int16, opts);
+                             GDT_Float32, opts);
             GDALSetGeoTransform(dst, gt);
             GDALSetProjection(dst, GDALGetProjectionRef(src));
             if (do_pass2) {
@@ -1255,13 +1277,13 @@ int main(int argc, char **argv)
                      * - which is most of the gap, at eight bytes a cell - take
                      * it, and keep the exact answer.
                      */
-                    short *whole = malloc((size_t) cols * rows * sizeof *whole);
+                    elev *whole = malloc((size_t) cols * rows * sizeof *whole);
                     unsigned char *wm = NULL, *mm = NULL;
                     if (!whole) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                     fprintf(stderr, "  pass 2: whole raster, %.0f MB of %.0f\n",
                             diffuse_mb(cols, rows), max_mem);
                     IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Read, 0, 0,
-                                     cols, rows, whole, cols, rows, GDT_Int16, 0, 0));
+                                     cols, rows, whole, cols, rows, GDT_Float32, 0, 0));
                     if (wb) {
                         wm = malloc((size_t) cols * rows);
                         if (!wm) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
@@ -1280,7 +1302,7 @@ int main(int argc, char **argv)
                         for (k = 0; k < nn; k++) if (!mm[k]) whole[k] = 0;
                     }
                     IO_(GDALRasterIO(GDALGetRasterBand(dst, 1), GF_Write, 0, 0,
-                                     cols, rows, whole, cols, rows, GDT_Int16, 0, 0));
+                                     cols, rows, whole, cols, rows, GDT_Float32, 0, 0));
                     free(whole); free(wm); free(mm);
                     fprintf(stderr, "  pass 2 complete\n");
                 } else {
@@ -1289,14 +1311,14 @@ int main(int argc, char **argv)
                                 p2_margin);
                 }
             } else {
-                short *row = malloc((size_t) cols * sizeof *row);
+                elev *row = malloc((size_t) cols * sizeof *row);
                 int y;
                 GDALSetRasterNoDataValue(GDALGetRasterBand(dst, 1), NO_ELEV);
                 for (y = 0; y < rows; y++) {
                     IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Read, 0, y, cols, 1,
-                                     row, cols, 1, GDT_Int16, 0, 0));
+                                     row, cols, 1, GDT_Float32, 0, 0));
                     IO_(GDALRasterIO(GDALGetRasterBand(dst, 1), GF_Write, 0, y, cols, 1,
-                                     row, cols, 1, GDT_Int16, 0, 0));
+                                     row, cols, 1, GDT_Float32, 0, 0));
                 }
                 free(row);
             }

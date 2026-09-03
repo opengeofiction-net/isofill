@@ -96,6 +96,29 @@ of the pair it judges: as a rate it asks more of a distant pair than a near one,
 which is backwards, since the distant pair is the one that had to survive more
 ground to be seen at all.
 
+## Elevations are floats
+
+Both passes work in `float` and write `Float32`, since September 2026. They were
+`short` and whole metres, and both rounded: the first pass rounded every value it
+interpolated between two contours, the second rounded everything it filled. A
+hillshade is a derivative, so that quantisation drew a faint ring around every
+contour - terracing - and nothing downstream could put back what had already been
+discarded. Smoothing the copy the hillshade is built from removes most of it and
+not all: the arcs are low in amplitude and follow the contours, so a per-cell step
+statistic barely moves (2.98% of neighbours differing by 3 grey levels against
+2.93%) while the map plainly changes.
+
+The sentinels keep their values rather than becoming NaN. `NO_ELEV`,
+`OUT_OF_REACH` and `ONE_LEVEL` are exactly representable in float and compare
+exactly, so every test that read them still reads them.
+
+It costs disk, more than the extra two bytes suggest: zone-ellarca's DEM is 105
+MB against 11 as Int16, because DEFLATE compresses interleaved float exponents
+and mantissas badly. `PREDICTOR=3`, the floating point predictor, is what the
+type wants and recovers about a tenth of that. It costs nothing in memory - the
+second pass holds one float array where it used to hold an Int16 buffer *and* a
+float copy of it, so the solve is smaller than before.
+
 ## The second pass
 
 The original's second pass interpolated along every row, along every column, and
