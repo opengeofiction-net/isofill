@@ -6,7 +6,7 @@ Files: *
 Copyright: 2017-2020 Thilo Stapff
            2026 Lee Kindness and OpenGeofiction administrators
 License: Artistic-1.0 or GPL-1.0-or-later
- isofill is derived from the terrain code of OGF-terrain-tools, kept in
+ isofill is derived from the terrain code of ogf-server-scripts, kept in
  original/, and carries the same terms: you may use, copy, modify and
  distribute it under either the Artistic Licence 1.0 or the GNU General Public
  Licence version 1, or at your option any later version of the GPL.
