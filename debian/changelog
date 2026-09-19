@@ -1,3 +1,17 @@
+isofill (0.6.0-1) unstable; urgency=medium
+
+  * A library. libisofill exposes the in-core fill as isofill_run(), arrays
+    in and an array out, and the binary's own in-core path now calls it, so
+    what the library returns and what the binary writes cannot differ. The
+    first pass's per-cell loop is one function shared by the in-core call
+    and the out-of-core banding. The surface is unchanged: danu's golden
+    reference, built with 0.5.0, still matches cell for cell.
+  * isofill --version, and isofill_version(), so a caller can check.
+  * make check runs the binary and a small C program against the library.
+  * The package installs the library and header beside the binary.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Sat, 19 Sep 2026 10:30:00 +0000
+
 isofill (0.5.0) unstable; urgency=medium
 
   * Elevations are floats. Both passes worked in short and whole metres, and
