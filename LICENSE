@@ -11,9 +11,11 @@ The full texts are in `licences/Artistic` and `licences/GPL-1`.
 
 ## Why these terms and not something more permissive
 
-isofill is derived from the terrain code of OGF-terrain-tools, which carries
-those terms, so it inherits them. The derivation is direct rather than
-incidental: the ray generator in `original/tile_util.c` is transliterated
+isofill is derived from the terrain code of `ogf-server-scripts`, which carries
+those terms, so it inherits them. That code has since moved again, to `danu`,
+and the repository was called `OGF-terrain-tools` when the derivation was made.
+
+The derivation is direct rather than incidental: the ray generator in `original/tile_util.c` is transliterated
 essentially line for line, and the interpolation rules it implements - the
 search for the steepest pair of visible contours, the
 `(v1*d2 + v2*d1) / (d1 + d2)` weighting between them, the gradient floor which
@@ -29,6 +31,6 @@ author could relicence that work.
     Copyright (c) 2026 Lee Kindness and OpenGeofiction administrators
 
 The first commit on this repository is the original C, imported unchanged from
-the `thilo-dem-process` tag of OGF-terrain-tools, so that what was inherited and
+the `thilo-dem-process` tag of that repository, so that what was inherited and
 what was written here can be told apart from the history alone. It is kept in
 `original/` for reference and is not built.
