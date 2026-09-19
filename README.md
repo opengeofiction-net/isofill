@@ -242,9 +242,10 @@ two, 6m08 on four, 4m09 on six.
 
 ## Provenance
 
-isofill reimplements the interpolation in the terrain code of
-[OGF-terrain-tools](https://github.com/opengeofiction-net/OGF-terrain-tools),
-written by Thilo Stapff. The first commit on this repository is that C, imported
+isofill reimplements the interpolation in the terrain code which used to live in
+[ogf-server-scripts](https://github.com/opengeofiction-net/ogf-server-scripts)
+and is now in [danu](https://github.com/opengeofiction-net/danu), written by
+Thilo Stapff. The first commit on this repository is that C, imported
 unchanged, so what was inherited and what was written here can be told apart from
 the history alone. It is kept in `original/` for reference and is not built.
 
