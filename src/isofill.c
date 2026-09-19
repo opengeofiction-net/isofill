@@ -1309,7 +1309,8 @@ int main(int argc, char **argv)
                 IO_(GDALRasterIO(wb, GF_Read, 0, 0, cols, rows, wbuf, cols, rows, GDT_Byte, 0, 0));
             }
             p.radius = radius; p.barrier = barrier; p.grad_min = grad_min;
-            p.pass2 = do_pass2; p.threads = 0;          /* set above, for the whole run */
+            p.pass2 = do_pass2;
+            p.threads = 0;   /* omp_set_num_threads(threads) ran above, for the whole run; 0 leaves it */
             filled = isofill_run(cons, has_nd, nd, mbuf, wbuf, cols, rows, &p, out);
             free(cons); free(mbuf); free(wbuf);
             if (filled < 0) {

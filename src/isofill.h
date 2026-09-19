@@ -29,8 +29,9 @@ const char *isofill_version(void);
  * Fill. constraints is cols*rows floats; a cell is a constraint unless it
  * equals nodata (when has_nodata) or -32768 (otherwise). mask and water are
  * cols*rows bytes or NULL, with the meaning of --mask and --water. out is
- * cols*rows floats and receives the surface. Returns the number of cells the
- * first pass set, or a negative value: -1 for bad arguments, -2 for memory.
+ * cols*rows floats and receives the surface; with pass2 set, cells outside the
+ * mask come back as 0, as the binary writes them. Returns the number of cells
+ * the first pass set, or a negative value: -1 for bad arguments, -2 for memory.
  */
 long long isofill_run(const float *constraints, int has_nodata, double nodata,
                       const unsigned char *mask, const unsigned char *water,

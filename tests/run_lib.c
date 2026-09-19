@@ -45,9 +45,11 @@ int main(void)
     /*
      * The interior only. The two columns beside each contour are inside the
      * --barrier dilation, so the first pass sees one level there and the
-     * second fills them; and the raster's top and bottom rows anchor toward
-     * zero beyond the drawn area, as the second pass is meant to. Both are
-     * isofill's behaviour, not the library's, and neither is what this asks.
+     * second fills them; and in the raster's top and bottom rows the unset
+     * cells anchor toward zero beyond the drawn area, as the second pass is
+     * meant to - the constraints themselves are fixed cells and do not move,
+     * which the loop above checks on every row. Both are isofill's behaviour,
+     * not the library's, and neither is what this asks.
      */
     for (y = 0; y < ROWS; y++)
         if (out[y * COLS + 4] != 100.0f || out[y * COLS + 27] != 200.0f)

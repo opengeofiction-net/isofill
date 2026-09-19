@@ -1,2 +1,6 @@
 isofill
 *.o
+libisofill.so
+libisofill.dll
+tests/run_lib
+tests/run_lib.exe

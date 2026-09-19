@@ -1,4 +1,4 @@
-isofill (0.6.0-1) unstable; urgency=medium
+isofill (0.6.0) unstable; urgency=medium
 
   * A library. libisofill exposes the in-core fill as isofill_run(), arrays
     in and an array out, and the binary's own in-core path now calls it, so
