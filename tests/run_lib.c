@@ -11,7 +11,7 @@
 
 #define COLS 32
 #define ROWS 16
-#define NO_ELEV (-32768.0f)
+#define NO_ELEV ((float) ISOFILL_NO_ELEV)
 
 static int fail(const char *what)
 {

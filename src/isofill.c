@@ -70,7 +70,7 @@
  */
 typedef float elev;
 
-#define NO_ELEV (-32768)
+#define NO_ELEV ISOFILL_NO_ELEV
 
 /*
  * A cell with no constraint at all within the radius. Distinct from NO_ELEV,

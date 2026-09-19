@@ -13,6 +13,11 @@
 
 #define ISOFILL_VERSION "0.6.0"
 
+/* The value a constraints cell holds when it is not a constraint and no
+ * nodata value is given; also what --no-pass2 leaves in cells it declined.
+ * The implementation's NO_ELEV is this, so the two cannot drift. */
+#define ISOFILL_NO_ELEV (-32768)
+
 typedef struct {
     int radius;        /* search radius in cells; --radius */
     int barrier;       /* widen constraints for the sight test; --barrier */
@@ -27,7 +32,7 @@ const char *isofill_version(void);
 
 /*
  * Fill. constraints is cols*rows floats; a cell is a constraint unless it
- * equals nodata (when has_nodata) or -32768 (otherwise). mask and water are
+ * equals nodata (when has_nodata) or ISOFILL_NO_ELEV (otherwise). mask and water are
  * cols*rows bytes or NULL, with the meaning of --mask and --water. out is
  * cols*rows floats and receives the surface; with pass2 set, cells outside the
  * mask come back as 0, as the binary writes them. Returns the number of cells
