@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Built and run, on both targets. Run, not only built: a binary that links
+  # and cannot load its GDAL DLLs is the Windows failure a build step never
+  # sees, and `make check` asks the binary for its usage and its exit.
+  #
+  # MSYS2 on Windows rather than conda: conda's libgdal ships no gdal-config,
+  # the Makefile stops without one, and for the whole of danu's phase 0 a
+  # continue-on-error reported that one-second failure as green. UCRT64 has
+  # gcc, make and a GDAL whose gdal-config works, so the same Makefile builds
+  # here as on Linux with nothing special-cased in it.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: gdal (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev
+      - name: toolchain and gdal (windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gdal
+      - name: build and check (linux)
+        if: runner.os == 'Linux'
+        run: make && make check
+      - name: build and check (windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: make && make check

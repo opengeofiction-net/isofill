@@ -24,8 +24,17 @@ install: isofill
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 isofill $(DESTDIR)$(PREFIX)/bin/isofill
 
+# A real check, not a cheerful one: the old target ended in || true and could
+# not fail. The binary is run and two things are required of it together -
+# the exit status isofill gives after printing usage, which is 2, and the
+# first line of that usage text exactly. A loader error can manage one of
+# those; not both. The same check danu's CI makes of the binary it builds.
 check: isofill
-	@./isofill --radius 4 2>&1 | grep -q usage && echo "usage ok" || true
+	@out=$$(./isofill 2>&1); st=$$?; \
+	if [ $$st -ne 2 ]; then echo "expected exit 2 after usage, got $$st"; exit 1; fi; \
+	printf '%s\n' "$$out" | head -1 | grep -qx 'usage: isofill \[options\] <constraints.tif> <out.tif>' \
+		|| { echo "first line of output is not the usage line"; printf '%s\n' "$$out" | head -3; exit 1; }; \
+	echo "isofill runs: exit 2 and its usage text"
 
 clean:
 	rm -f isofill
