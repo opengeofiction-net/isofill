@@ -59,6 +59,15 @@ Or build a Debian package:
 Check the built package depends on `libgomp1`. If it does not, `-fopenmp` was
 dropped somewhere and the binary is quietly single threaded.
 
+`make` also builds `libisofill.so` (`.dll` under MSYS2) from the same source,
+compiled without `main`, and `make install` puts it and `src/isofill.h` beside
+the binary. `isofill_run()` is the in-core fill - arrays in, an array out - and
+the binary's own in-core path is a call to it, so a program linking the library
+gets exactly the surface the binary writes. There is no stable ABI:
+`isofill_version()` is there so a caller can refuse a library that is not the
+one it was built against, and `isofill --version` prints the same string.
+`make check` runs the binary and a small program against the library.
+
 ## Options
 
 | | |
