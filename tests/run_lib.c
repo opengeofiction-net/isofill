@@ -23,12 +23,20 @@ int main(void)
 {
     static float cons[COLS * ROWS], out[COLS * ROWS];
     static unsigned char mask[COLS * ROWS];
-    isofill_params p = { 20, 1, 0.02, 1, 1 };
+    isofill_params p;
     long long filled;
     int x, y;
 
     if (strcmp(isofill_version(), ISOFILL_VERSION) != 0)
         return fail("isofill_version() is not the header's ISOFILL_VERSION");
+
+    /* start from the binary's defaults and set only what this test means to */
+    isofill_params_default(&p);
+    if (p.radius != 20 || p.barrier != 1 || p.grad_min != 0.02 || p.pass2 != 1)
+        return fail("isofill_params_default() is not the command line's defaults");
+    p.threads = 1;
+    if (isofill_whole_mb(1000, 1000) < 12.0 || isofill_whole_mb(1000, 1000) > 13.0)
+        return fail("isofill_whole_mb(1000, 1000) is not about 12.4 MB");
 
     /* two contours: 100 m down column 4, 200 m down column 27; everything
      * else unset, and the whole raster inside the mask */

@@ -839,6 +839,22 @@ const char *isofill_version(void)
     return ISOFILL_VERSION;
 }
 
+void isofill_params_default(isofill_params *p)
+{
+    p->radius = 20;
+    p->barrier = 1;
+    p->grad_min = 0.02;
+    p->pass2 = 1;
+    p->threads = 0;
+}
+
+double isofill_whole_mb(int cols, int rows)
+{
+    /* values, mask, output and the summed area table */
+    return ((double) cols * rows * 5.0
+            + (double) (cols + 1) * (rows + 1) * 8.0) / (1024 * 1024);
+}
+
 /*
  * The in-core fill, whole raster, both passes, exactly as the binary does it
  * for a raster within --max-mem: the binary's own in-core path is a call to
@@ -1157,9 +1173,15 @@ int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
     const char *water_path = NULL;
-    int radius = 20, do_pass2 = 1, threads = 0, i;
-    double grad_min = 0.02, max_mem = 4096;
-    int p2_margin = -1, barrier = 1;
+    isofill_params d;
+    int radius, do_pass2, threads, i;
+    double grad_min, max_mem = 4096;
+    int p2_margin = -1, barrier;
+
+    /* the one place the defaults live; the library hands out the same */
+    isofill_params_default(&d);
+    radius = d.radius; barrier = d.barrier; grad_min = d.grad_min;
+    do_pass2 = d.pass2; threads = d.threads;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--radius") && i + 1 < argc) radius = atoi(argv[++i]);
@@ -1253,9 +1275,7 @@ int main(int argc, char **argv)
          */
         if (p2_margin < 0) p2_margin = 6 * radius;
 
-        /* values, mask, output and the summed area table, in megabytes */
-        whole_mb = ((double) cols * rows * 5.0
-                    + (double) (cols + 1) * (rows + 1) * 8.0) / (1024 * 1024);
+        whole_mb = isofill_whole_mb(cols, rows);
 
         opts = CSLSetNameValue(opts, "TILED", "YES");
         /*

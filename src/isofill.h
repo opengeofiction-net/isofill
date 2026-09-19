@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.6.0"
+#define ISOFILL_VERSION "0.7.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -29,6 +29,18 @@ typedef struct {
 /* A version string, so a caller can refuse a library that is not the one it
  * was built against; there is no stable ABI. */
 const char *isofill_version(void);
+
+/* The defaults the command line uses when a flag is not given - radius 20,
+ * barrier 1, grad_min 0.02, pass 2 on, threads left to the runtime. A caller
+ * that sets only what it means to set gets the binary's behaviour for the
+ * rest, by construction rather than by copying numbers. The binary's own
+ * main() starts from this. */
+void isofill_params_default(isofill_params *p);
+
+/* What the in-core fill holds for a raster of this size, in megabytes, as the
+ * binary reckons it when deciding whether to band. A caller with less than
+ * this to spare wants the binary, which bands; the library does not. */
+double isofill_whole_mb(int cols, int rows);
 
 /*
  * Fill. constraints is cols*rows floats; a cell is a constraint unless it

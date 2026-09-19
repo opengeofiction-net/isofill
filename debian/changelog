@@ -1,3 +1,15 @@
+isofill (0.7.0) unstable; urgency=medium
+
+  * isofill_params_default(): the command line's defaults, from the library,
+    so a caller that sets only what it means to set gets the binary's
+    behaviour for the rest by construction. main() starts from it too, so
+    there is one place the defaults live.
+  * isofill_whole_mb(): the in-core memory reckoning the binary uses to
+    decide whether to band, for a caller deciding whether to use the
+    library at all.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Sat, 19 Sep 2026 11:15:00 +0000
+
 isofill (0.6.0) unstable; urgency=medium
 
   * A library. libisofill exposes the in-core fill as isofill_run(), arrays
