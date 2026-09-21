@@ -26,6 +26,15 @@ jobs:
       - name: gdal (linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgdal-dev
+      # libgfortran is named although GDAL depends on it anyway: it provides
+      # fc-libs, and on 2026-09-21 the other provider - gcc-libgfortran -
+      # pinned a gcc-libs the repository had already moved past. pacman under
+      # --noconfirm takes the first provider, could not resolve it, answered
+      # its own "skip gdal for this upgrade?" with yes, installed the
+      # toolchain alone and exited 0; the build then stopped on gdal-config,
+      # which read as our fault. MSYS2 has since dropped gcc-libgfortran, so
+      # naming the survivor is a no-op today and takes the coin toss out of
+      # the next rename
       - name: toolchain and gdal (windows)
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
@@ -35,7 +44,20 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-libgfortran
             mingw-w64-ucrt-x86_64-gdal
+      # pacman can answer its own "skip this package?" with yes under
+      # --noconfirm and still exit 0, so what was asked for is checked rather
+      # than trusted. The versions are worth the log lines besides
+      - name: check the toolchain is what was asked for (windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -eu
+          gdal-config --version
+          gdal-config --libs
+          gcc --version | head -1
+          make --version | head -1
       - name: build and check (linux)
         if: runner.os == 'Linux'
         run: make && make check
