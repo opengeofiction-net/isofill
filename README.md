@@ -63,7 +63,13 @@ dropped somewhere and the binary is quietly single threaded.
 compiled without `main`, and `make install` puts it and `src/isofill.h` beside
 the binary. `isofill_run()` is the in-core fill - arrays in, an array out - and
 the binary's own in-core path is a call to it, so a program linking the library
-gets exactly the surface the binary writes. There is no stable ABI:
+gets exactly the surface the binary writes. `isofill_run_ex()` is the same fill
+with the first pass kept: it takes a second output array and writes what
+`--no-pass2` would write into it, before the second pass overwrites the cells
+the first declined. The first pass is nearly all of the work - 0.56 s of a
+0.67 s run on a 3601x2401 raster - so a caller that wants both the surface and
+a reading of what the first pass could not answer gets both for one run instead
+of two. There is no stable ABI:
 `isofill_version()` is there so a caller can refuse a library that is not the
 one it was built against, and `isofill --version` prints the same string.
 `make check` runs the binary and a small program against the library.

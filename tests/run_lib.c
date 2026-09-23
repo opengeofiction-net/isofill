@@ -77,12 +77,45 @@ int main(void)
     /* the caller's arrays were not written */
     if (cons[7 * COLS + 10] != NO_ELEV) return fail("isofill_run wrote to the constraints");
 
+    /*
+     * isofill_run_ex hands back the first pass from the same run. What it
+     * gives has to be what a second run with pass2 off would write, cell for
+     * cell, or a caller reading it is reading something else - and the finished
+     * surface has to be the one isofill_run gives, so keeping the first pass
+     * costs nothing but the copy.
+     */
+    {
+        static float both[COLS * ROWS], p1[COLS * ROWS], only1[COLS * ROWS];
+        long long f_ex, f_1;
+        size_t i;
+        isofill_params_default(&p);
+        p.threads = 1;
+        f_ex = isofill_run_ex(cons, 0, 0.0, mask, NULL, COLS, ROWS, &p, both, p1);
+        if (f_ex != filled) return fail("isofill_run_ex filled a different number of cells");
+        for (i = 0; i < (size_t) COLS * ROWS; i++)
+            if (both[i] != out[i]) return fail("isofill_run_ex's surface is not isofill_run's");
+        p.pass2 = 0;
+        f_1 = isofill_run(cons, 0, 0.0, mask, NULL, COLS, ROWS, &p, only1);
+        if (f_1 != filled) return fail("--no-pass2 filled a different number of cells");
+        for (i = 0; i < (size_t) COLS * ROWS; i++)
+            if (p1[i] != only1[i]) return fail("the kept first pass is not what --no-pass2 writes");
+        /* and it really is the first pass, not the finished surface: the cells
+         * beside the barrier that the second pass filled are still sentinels */
+        if (p1[7 * COLS + 5] > -32000.0f) return fail("the kept first pass has no declined cells in it");
+        /* NULL is allowed and is what isofill_run passes */
+        isofill_params_default(&p);
+        p.threads = 1;
+        if (isofill_run_ex(cons, 0, 0.0, mask, NULL, COLS, ROWS, &p, both, NULL) != filled)
+            return fail("isofill_run_ex with no pass1_out is not isofill_run");
+    }
+
     /* and bad arguments are refused, not acted on */
     if (isofill_run(NULL, 0, 0.0, NULL, NULL, COLS, ROWS, &p, out) != -1) return fail("NULL constraints accepted");
     p.radius = 0;
     if (isofill_run(cons, 0, 0.0, NULL, NULL, COLS, ROWS, &p, out) != -1) return fail("radius 0 accepted");
 
-    printf("libisofill %s: fills between contours, leaves inputs alone, refuses nonsense\n",
+    printf("libisofill %s: fills between contours, keeps the first pass, "
+           "leaves inputs alone, refuses nonsense\n",
            isofill_version());
     return 0;
 }
