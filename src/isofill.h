@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.7.0"
+#define ISOFILL_VERSION "0.8.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -54,5 +54,24 @@ long long isofill_run(const float *constraints, int has_nodata, double nodata,
                       const unsigned char *mask, const unsigned char *water,
                       int cols, int rows, const isofill_params *params,
                       float *out);
+
+/*
+ * The same fill, with the first pass kept.
+ *
+ * pass1_out is cols*rows floats or NULL. When it is given it receives the
+ * surface as the first pass left it - which is what --no-pass2 writes, sentinels
+ * and all - before the second pass overwrites the cells the first declined.
+ * isofill_run is this with NULL.
+ *
+ * It exists because the first pass is nearly all of the work: on a 3601x2401
+ * raster it is 0.56 s of a 0.67 s run. A caller that wants both the finished
+ * surface and a reading of what the first pass could not answer - which is how
+ * the editor draws the ground its contours do not describe - would otherwise
+ * run the whole thing twice and throw one surface away.
+ */
+long long isofill_run_ex(const float *constraints, int has_nodata, double nodata,
+                         const unsigned char *mask, const unsigned char *water,
+                         int cols, int rows, const isofill_params *params,
+                         float *out, float *pass1_out);
 
 #endif

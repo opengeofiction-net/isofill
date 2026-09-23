@@ -858,12 +858,22 @@ double isofill_whole_mb(int cols, int rows)
 /*
  * The in-core fill, whole raster, both passes, exactly as the binary does it
  * for a raster within --max-mem: the binary's own in-core path is a call to
- * this. The caller's arrays are not written except out; diffuse wants to own
- * and free the masks it is given, so it is given copies.
+ * this. The caller's arrays are not written except out, and pass1_out where
+ * isofill_run_ex is given one; diffuse wants to own and free the masks it is
+ * given, so it is given copies.
  */
 long long isofill_run(const float *constraints, int has_nodata, double nodata,
                       const unsigned char *mask, const unsigned char *water,
                       int cols, int rows, const isofill_params *p, float *out)
+{
+    return isofill_run_ex(constraints, has_nodata, nodata, mask, water,
+                          cols, rows, p, out, NULL);
+}
+
+long long isofill_run_ex(const float *constraints, int has_nodata, double nodata,
+                         const unsigned char *mask, const unsigned char *water,
+                         int cols, int rows, const isofill_params *p,
+                         float *out, float *pass1_out)
 {
     size_t n, k;
     Rays *rays;
@@ -883,6 +893,10 @@ long long isofill_run(const float *constraints, int has_nodata, double nodata,
                         p->barrier, has_nodata, nodata, out);
     free(v);
     rays_free(rays);
+    /* before the second pass touches it: this is what --no-pass2 would write,
+     * and taking it here is the whole point of isofill_run_ex */
+    if (pass1_out)
+        memcpy(pass1_out, out, n * sizeof *out);
     if (p->pass2) {
         unsigned char *wbuf = NULL, *mbuf = NULL;
         if (water) {

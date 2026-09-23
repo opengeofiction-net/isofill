@@ -1,3 +1,13 @@
+isofill (0.8.0) unstable; urgency=medium
+
+  * isofill_run_ex(): the same fill with the first pass kept, for a caller
+    that wants both the finished surface and a reading of the cells the first
+    pass could not answer. The first pass is nearly all of the run, so that
+    caller was doing the whole thing twice and throwing one surface away.
+    isofill_run() is this with a null second output and is unchanged.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Wed, 23 Sep 2026 22:55:48 +0100
+
 isofill (0.7.0) unstable; urgency=medium
 
   * isofill_params_default(): the command line's defaults, from the library,
