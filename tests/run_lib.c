@@ -114,8 +114,88 @@ int main(void)
     p.radius = 0;
     if (isofill_run(cons, 0, 0.0, NULL, NULL, COLS, ROWS, &p, out) != -1) return fail("radius 0 accepted");
 
+    /*
+     * isofill_diffuse: the second pass on its own. Given the surface pass 1
+     * left, it has to produce what isofill_run produces, cell for cell, or a
+     * caller composing the two passes by hand is not composing the same fill.
+     */
+    {
+        static float whole[COLS * ROWS], p1[COLS * ROWS], piece[COLS * ROWS];
+        size_t i;
+        isofill_params_default(&p);
+        p.threads = 1;
+        if (isofill_run_ex(cons, 0, 0.0, mask, NULL, COLS, ROWS, &p, whole, p1) < 0)
+            return fail("isofill_run_ex returned an error");
+        memcpy(piece, p1, sizeof piece);
+        if (isofill_diffuse(piece, mask, NULL, COLS, ROWS) != 0)
+            return fail("isofill_diffuse returned an error");
+        for (i = 0; i < (size_t) COLS * ROWS; i++)
+            if (piece[i] != whole[i])
+                return fail("isofill_diffuse is not the pass 2 isofill_run does");
+        if (isofill_diffuse(NULL, NULL, NULL, COLS, ROWS) != -1)
+            return fail("isofill_diffuse accepted a null surface");
+    }
+
+    /*
+     * And what it is for: a box cut out of a larger surface, with its rim
+     * written from the answer the whole raster gave. Both contours here are on
+     * the left, so the right-hand two thirds is out of reach of either - the
+     * first pass declines it, and a whole-raster second pass floods it from the
+     * raster edge and holds it at zero. A rim that says the ground goes on is
+     * a different boundary, and the solve has to run up to it.
+     */
+    {
+#define WCOLS 64
+        static float far_cons[WCOLS * ROWS], loose[WCOLS * ROWS];
+        static float far_p1[WCOLS * ROWS], bounded[WCOLS * ROWS];
+        static unsigned char wide_mask[WCOLS * ROWS];
+        int yy, xx, differs = 0;
+        size_t i, mid = (size_t) (ROWS / 2) * WCOLS;
+        for (yy = 0; yy < ROWS; yy++)
+            for (xx = 0; xx < WCOLS; xx++) {
+                size_t k = (size_t) yy * WCOLS + xx;
+                far_cons[k] = xx == 4 ? 100.0f : xx == 10 ? 200.0f : NO_ELEV;
+                /* a strip nobody drew, so the mask has something to do. It sits
+                 * between the two contours, where the ground either side is in
+                 * reach of both: out in the far third it would instead seed the
+                 * void flood and hold everything beyond it at zero, which is
+                 * the algorithm working and not this scenario */
+                wide_mask[k] = (xx == 6 || xx == 7) ? 0 : 1;
+            }
+        isofill_params_default(&p);
+        p.threads = 1;
+        if (isofill_run_ex(far_cons, 0, 0.0, wide_mask, NULL, WCOLS, ROWS, &p, loose, far_p1) < 0)
+            return fail("the wide raster would not fill");
+        if (loose[mid + WCOLS - 2] != 0.0f)
+            return fail("the far ground is not zeroed without a rim, so this tests nothing");
+
+        memcpy(bounded, far_p1, sizeof bounded);
+        for (yy = 0; yy < ROWS; yy++)
+            for (xx = 0; xx < WCOLS; xx++)
+                if (xx == 0 || xx == WCOLS - 1 || yy == 0 || yy == ROWS - 1)
+                    bounded[(size_t) yy * WCOLS + xx] = 300.0f;
+        if (isofill_diffuse(bounded, wide_mask, NULL, WCOLS, ROWS) != 0)
+            return fail("the bounded diffuse returned an error");
+
+        for (yy = 0; yy < ROWS; yy++)
+            if (bounded[(size_t) yy * WCOLS + WCOLS - 1] != 300.0f)
+                return fail("a rim cell moved - the rim was flooded or solved over");
+        if (bounded[mid + WCOLS - 2] <= 0.0f)
+            return fail("the ground beside the rim was not solved towards it");
+        for (i = 0; i < (size_t) WCOLS * ROWS; i++)
+            if (bounded[i] != loose[i]) differs++;
+        if (differs < ROWS)
+            return fail("the rim changed nothing, so it is not bounding the solve");
+        /* the undrawn strip is zero, which is what passing the mask through is for */
+        for (yy = 1; yy < ROWS - 1; yy++)
+            for (xx = 6; xx <= 7; xx++)
+                if (bounded[(size_t) yy * WCOLS + xx] != 0.0f)
+                    return fail("a cell outside the mask was filled");
+    }
+
     printf("libisofill %s: fills between contours, keeps the first pass, "
-           "leaves inputs alone, refuses nonsense\n",
+           "diffuses a box against a written rim, leaves inputs alone, "
+           "refuses nonsense\n",
            isofill_version());
     return 0;
 }

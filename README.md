@@ -69,7 +69,13 @@ with the first pass kept: it takes a second output array and writes what
 the first declined. The first pass is nearly all of the work - 0.56 s of a
 0.67 s run on a 3601x2401 raster - so a caller that wants both the surface and
 a reading of what the first pass could not answer gets both for one run instead
-of two. There is no stable ABI:
+of two. `isofill_diffuse()` is the second pass on its own, over a surface the
+first pass has already written: with no way to say "hold this cell" beyond
+writing a value into it, since the solve never moves a cell that is not a
+sentinel, a caller can cut a box out of a larger surface, write the rim from the
+last whole-raster answer, and get the second pass for the box alone. That is an
+approximation - diffusion is global - and how good one is depends on how far a
+change travels in the data at hand. There is no stable ABI:
 `isofill_version()` is there so a caller can refuse a library that is not the
 one it was built against, and `isofill --version` prints the same string.
 `make check` runs the binary and a small program against the library.

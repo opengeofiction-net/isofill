@@ -917,6 +917,32 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
     return filled;
 }
 
+int isofill_diffuse(float *surface, const unsigned char *mask,
+                    const unsigned char *water, int cols, int rows)
+{
+    size_t n;
+    unsigned char *mbuf = NULL, *wbuf = NULL;
+    if (!surface || cols <= 0 || rows <= 0)
+        return -1;
+    n = (size_t) cols * rows;
+    /* diffuse owns and frees the masks it is given - it lets them go before
+     * the solve, which at zone scale is gigabytes worth doing - so it gets
+     * copies. A caller of this is solving a box, where two bytes a cell is
+     * nothing, and its arrays are not ours to free. */
+    if (mask) {
+        mbuf = malloc(n);
+        if (!mbuf) return -2;
+        memcpy(mbuf, mask, n);
+    }
+    if (water) {
+        wbuf = malloc(n);
+        if (!wbuf) { free(mbuf); return -2; }
+        memcpy(wbuf, water, n);
+    }
+    diffuse(surface, water ? &wbuf : NULL, mask ? &mbuf : NULL, cols, rows);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ the binary */
 /* Everything from here is the command line: raster I/O, the out-of-core paths,
  * main. Compiled out of the library with -DISOFILL_NO_MAIN. */
