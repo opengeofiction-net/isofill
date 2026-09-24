@@ -93,7 +93,12 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
  * isofill_run's own pass 2 is this function's behaviour with the surface it
  * had just filled, which the library test pins.
  *
- * Returns 0, or -1 for bad arguments and -2 for out of memory.
+ * Returns 0, or -1 for bad arguments and -2 for out of memory - and means it:
+ * the whole of the second pass reports a failed allocation rather than
+ * printing and calling exit, which a library has no business doing to the
+ * program that loaded it. The first pass does still exit that way, so
+ * isofill_run's own -2 is not yet the whole truth; it is the next thing to fix
+ * and nothing here depends on it.
  */
 int isofill_diffuse(float *surface, const unsigned char *mask,
                     const unsigned char *water, int cols, int rows);
