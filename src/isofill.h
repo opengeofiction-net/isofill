@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.8.0"
+#define ISOFILL_VERSION "0.9.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -73,5 +73,34 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
                          const unsigned char *mask, const unsigned char *water,
                          int cols, int rows, const isofill_params *params,
                          float *out, float *pass1_out);
+
+/*
+ * The second pass on its own, over a surface the first pass has already
+ * written. surface is cols*rows floats holding what pass 1 left - sentinels
+ * for the cells it declined - and is solved in place. mask and water are
+ * cols*rows bytes or NULL and mean what they mean to isofill_run.
+ *
+ * There is no separate way to say "hold this cell": a cell carrying anything
+ * that is not a sentinel is already fixed, and the solve never moves a fixed
+ * cell. So a caller that cuts a box out of a larger surface writes the last
+ * whole-raster answer into the box's rim, and the second pass runs up to it
+ * instead of to the raster's edge.
+ *
+ * That is an approximation - diffusion is global, and a rim held at yesterday's
+ * answer is a boundary the whole-raster solve does not have. How good one is
+ * depends on how far a change travels, which is the caller's to measure.
+ *
+ * isofill_run's own pass 2 is this function's behaviour with the surface it
+ * had just filled, which the library test pins.
+ *
+ * Returns 0, or -1 for bad arguments and -2 for out of memory - and means it:
+ * the whole of the second pass reports a failed allocation rather than
+ * printing and calling exit, which a library has no business doing to the
+ * program that loaded it. The first pass does still exit that way, so
+ * isofill_run's own -2 is not yet the whole truth; it is the next thing to fix
+ * and nothing here depends on it.
+ */
+int isofill_diffuse(float *surface, const unsigned char *mask,
+                    const unsigned char *water, int cols, int rows);
 
 #endif

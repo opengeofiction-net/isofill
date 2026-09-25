@@ -413,8 +413,8 @@ static elev radius_value(const Band *b, const Rays *r, int radius,
 
 /* ------------------------------------------------------------------ pass 2 */
 
-static void diffuse(elev *v, unsigned char **water, unsigned char **mask,
-                    int cols, int rows);
+static int diffuse(elev *v, unsigned char **water, unsigned char **mask,
+                   int cols, int rows);
 
 /*
  * Pass 2 the way the original ran it. It never saw more than one tile: 512
@@ -602,12 +602,13 @@ static void diffuse_prolong(const float *cz, int ccols, int crows,
  * and backward sweeps carry a flag the length of a run at a time and converge
  * in a handful of passes on shapes this simple.
  */
-static unsigned char *mark_void(const unsigned char *oor, const unsigned char *mask,
-                                int cols, int rows)
+static int mark_void(const unsigned char *oor, const unsigned char *mask,
+                     int cols, int rows, unsigned char **out)
 {
     unsigned char *vd = calloc((size_t) cols * rows, 1);
     int y, x, pass, changed;
-    if (!vd) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+    *out = NULL;
+    if (!vd) return -2;
 
     /* seeds: outside the drawn area, and the raster edge, which the linear pass
      * anchors at zero one step beyond */
@@ -638,7 +639,8 @@ static unsigned char *mark_void(const unsigned char *oor, const unsigned char *m
             }
         if (!changed) break;
     }
-    return vd;
+    *out = vd;
+    return 0;
 }
 
 /*
@@ -646,7 +648,7 @@ static unsigned char *mark_void(const unsigned char *oor, const unsigned char *m
  * and zero elsewhere, fx says which is which. Coarse to fine over a pyramid,
  * because relaxation moves information one cell per sweep.
  */
-static void solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
+static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
 {
     float *z[DIFFUSE_LEVELS];
     unsigned char *fx[DIFFUSE_LEVELS];
@@ -659,7 +661,7 @@ static void solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
         int cc = (lc[n - 1] + 1) / 2, cr = (lr[n - 1] + 1) / 2;
         z[n] = malloc((size_t) cc * cr * sizeof *z[n]);
         fx[n] = malloc((size_t) cc * cr);
-        if (!z[n] || !fx[n]) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+        if (!z[n] || !fx[n]) { free(z[n]); free(fx[n]); goto oom; }
         diffuse_restrict(z[n - 1], fx[n - 1], lc[n - 1], lr[n - 1],
                          z[n], fx[n], cc, cr);
         lc[n] = cc; lr[n] = cr;
@@ -670,7 +672,7 @@ static void solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
     for (i = n - 2; i >= 0; i--) {
         size_t m = (size_t) lc[i] * lr[i], j;
         float *fine = (i == 0) ? NULL : malloc(m * sizeof *fine);
-        if (i && !fine) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+        if (i && !fine) goto oom;
         if (!fine) {
             /* the finest level is the caller's array. Prolong into the unknowns
              * in place: a whole extra copy of it, at four bytes a cell, is the
@@ -695,6 +697,11 @@ static void solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
         gs_sweeps(z[i], fx[i], lc[i], lr[i], DIFFUSE_SWEEPS, i);
     }
     for (i = 1; i < n; i++) { free(z[i]); free(fx[i]); }
+    return 0;
+oom:
+    /* the coarse levels this had built; z[0] and fx[0] are the caller's */
+    for (i = 1; i < n; i++) { free(z[i]); free(fx[i]); }
+    return -2;
 }
 
 /* Which cells are held, and at what. */
@@ -734,8 +741,8 @@ static double diffuse_mb(int cols, int rows)
 }
 #endif
 
-static void diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
-                    int cols, int rows)
+static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
+                   int cols, int rows)
 {
     const unsigned char *water = waterp ? *waterp : NULL;
     const unsigned char *mask = maskp ? *maskp : NULL;
@@ -743,9 +750,21 @@ static void diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
     unsigned char *oor = calloc(cells, 1), *vd;
     unsigned char *fx = malloc(cells);
 
-    if (!oor || !fx) { fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1); }
+    /* the masks are this function's to free however it leaves, so a caller
+     * that handed them over never has to wonder */
+    if (!oor || !fx) {
+        free(oor); free(fx);
+        if (waterp) { free(*waterp); *waterp = NULL; }
+        if (maskp)  { free(*maskp);  *maskp  = NULL; }
+        return -2;
+    }
     for (k = 0; k < cells; k++) oor[k] = (v[k] == OUT_OF_REACH);
-    vd = mark_void(oor, mask, cols, rows);
+    if (mark_void(oor, mask, cols, rows, &vd) != 0) {
+        free(oor); free(fx);
+        if (waterp) { free(*waterp); *waterp = NULL; }
+        if (maskp)  { free(*maskp);  *maskp  = NULL; }
+        return -2;
+    }
     free(oor);
 
     /*
@@ -768,8 +787,11 @@ static void diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
     free(vd);
     if (waterp) { free(*waterp); *waterp = NULL; }
     if (maskp)  { free(*maskp);  *maskp  = NULL; }
-    solve_pyramid(v, fx, cols, rows);
-    free(fx);
+    {
+        int rc = solve_pyramid(v, fx, cols, rows);
+        free(fx);
+        return rc;
+    }
 }
 
 /* ------------------------------------------------------------------ pass 1 core */
@@ -909,12 +931,38 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
             if (!mbuf) { free(wbuf); return -2; }
             memcpy(mbuf, mask, n);
         }
-        diffuse(out, &wbuf, &mbuf, cols, rows);          /* frees both copies */
+        if (diffuse(out, &wbuf, &mbuf, cols, rows) != 0)  /* frees both copies */
+            return -2;
         /* outside the mask nothing is filled, so nothing is left there */
         if (mask)
             for (k = 0; k < n; k++) if (!mask[k]) out[k] = 0;
     }
     return filled;
+}
+
+int isofill_diffuse(float *surface, const unsigned char *mask,
+                    const unsigned char *water, int cols, int rows)
+{
+    size_t n;
+    unsigned char *mbuf = NULL, *wbuf = NULL;
+    if (!surface || cols <= 0 || rows <= 0)
+        return -1;
+    n = (size_t) cols * rows;
+    /* diffuse owns and frees the masks it is given - it lets them go before
+     * the solve, which at zone scale is gigabytes worth doing - so it gets
+     * copies. A caller of this is solving a box, where two bytes a cell is
+     * nothing, and its arrays are not ours to free. */
+    if (mask) {
+        mbuf = malloc(n);
+        if (!mbuf) return -2;
+        memcpy(mbuf, mask, n);
+    }
+    if (water) {
+        wbuf = malloc(n);
+        if (!wbuf) { free(mbuf); return -2; }
+        memcpy(wbuf, water, n);
+    }
+    return diffuse(surface, water ? &wbuf : NULL, mask ? &mbuf : NULL, cols, rows);
 }
 
 /* ------------------------------------------------------------------ the binary */
@@ -1013,12 +1061,18 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
         free(acc); free(nfix);
     }
     for (y = 0; (size_t) y < ccells; y++) if (cout_of_mask[y]) coor[y] = 1;
-    cvd = mark_void(coor, mb ? cout_of_mask : NULL, cc, cr);
+    /* the binary still dies loudly where the library reports: this is a batch
+     * run of one zone, and there is nothing useful to hand back to */
+    if (mark_void(coor, mb ? cout_of_mask : NULL, cc, cr, &cvd) != 0) {
+        fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1);
+    }
     for (y = 0; (size_t) y < ccells; y++)
         if (cvd[y] || cout_of_mask[y]) { cfx[y] = 1; cz[y] = 0.0f; }
     free(coor); free(cout_of_mask);
 
-    solve_pyramid(cz, cfx, cc, cr);
+    if (solve_pyramid(cz, cfx, cc, cr) != 0) {
+        fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1);
+    }
     free(cfx);
 
     /* carry it back down, a band of rows at a time */
@@ -1087,7 +1141,9 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
                     else if (!fx[k]) z[k] = cz[ck];
                 }
             }
-            solve_pyramid(z, fx, cols, bh);
+            if (solve_pyramid(z, fx, cols, bh) != 0) {
+                fprintf(stderr, "isofill: out of memory for a pass 2 band\n"); exit(1);
+            }
 
             for (y = 0; y < h; y++)
                 for (x = 0; x < cols; x++) {
@@ -1473,7 +1529,10 @@ int main(int argc, char **argv)
                         IO_(GDALRasterIO(mb, GF_Read, 0, 0, cols, rows, mm, cols, rows,
                                          GDT_Byte, 0, 0));
                     }
-                    diffuse(whole, &wm, &mm, cols, rows);
+                    if (diffuse(whole, &wm, &mm, cols, rows) != 0) {
+                        fprintf(stderr, "isofill: out of memory for pass 2\n");
+                        exit(1);
+                    }
                     /* no mask pass afterwards: diffuse fixes the cells outside
                      * it at zero and the solve never moves a fixed cell, so the
                      * zeroing the linear path needed is already done */

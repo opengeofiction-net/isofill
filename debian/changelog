@@ -1,3 +1,17 @@
+isofill (0.9.0) unstable; urgency=medium
+
+  * isofill_diffuse(): the second pass on its own, for a caller that wants to
+    re-solve a box out of a larger surface rather than the whole raster. The
+    boundary is expressed by writing values into the surface, which the solve
+    already treats as fixed, so there is no new concept in the API - only the
+    pass that was not reachable before.
+  * The second pass reports a failed allocation instead of printing and
+    calling exit, so a library caller is told rather than killed. The binary
+    still dies loudly, which is right for a batch run. The first pass is
+    unchanged and still exits.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Thu, 24 Sep 2026 23:38:55 +0100
+
 isofill (0.8.0) unstable; urgency=medium
 
   * isofill_run_ex(): the same fill with the first pass kept, for a caller
