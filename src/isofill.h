@@ -49,6 +49,12 @@ double isofill_whole_mb(int cols, int rows);
  * cols*rows floats and receives the surface; with pass2 set, cells outside the
  * mask come back as 0, as the binary writes them. Returns the number of cells
  * the first pass set, or a negative value: -1 for bad arguments, -2 for memory.
+ *
+ * -2 is not the whole of what running out of memory does here. The second pass
+ * reports it; the first prints and calls exit, which a library has no business
+ * doing to the program that loaded it, and converting it is the next thing to
+ * do. Until then a caller of this cannot treat a return as the only way out.
+ * isofill_diffuse, which is the second pass alone, has no such hole.
  */
 long long isofill_run(const float *constraints, int has_nodata, double nodata,
                       const unsigned char *mask, const unsigned char *water,
@@ -95,10 +101,9 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
  *
  * Returns 0, or -1 for bad arguments and -2 for out of memory - and means it:
  * the whole of the second pass reports a failed allocation rather than
- * printing and calling exit, which a library has no business doing to the
- * program that loaded it. The first pass does still exit that way, so
- * isofill_run's own -2 is not yet the whole truth; it is the next thing to fix
- * and nothing here depends on it.
+ * printing and calling exit. The first pass is not converted yet, which is
+ * said on isofill_run where a caller of that will see it; nothing here goes
+ * near the first pass.
  */
 int isofill_diffuse(float *surface, const unsigned char *mask,
                     const unsigned char *water, int cols, int rows);
