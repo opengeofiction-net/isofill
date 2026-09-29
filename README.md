@@ -236,14 +236,49 @@ void and the whole solve does not - the coarse grid deciding connectivity at 1
 in 4 rather than cell by cell - and the rest is each band solving a different
 problem from the whole raster.
 
-Two things it is **not**, both measured before concluding them. Not the band
-joins: the error away from one averages 5.30 m against 6.45 m within a hundred
-rows of one, and the worst rows are nowhere near a join. And not the overlap:
-widening the margin from 192 rows to 512 changes the output without moving any
-of those figures. A first attempt that only relaxed each band from the coarse
-answer, rather than solving it, was much worse - p99.9 of 1769 m against 586 -
-because relaxation carries information one cell per sweep and the contours here
-are hundreds of cells apart.
+**It is the band joins, and that was measured wrong the first time.** This said
+it was not, on the strength of the error away from a join averaging 5.30 m
+against 6.45 m within a hundred rows of one. A mean over every cell cannot
+show it: the cells that are badly wrong are a thousandth of the raster, so they
+move that mean by nothing. Asked where the *large* errors are rather than where
+the average error is, the answer is unambiguous.
+
+Measured on the gobras 3x3 at 1 arcsecond, 10801x7201, forced out of core with
+`--max-mem 256` - 931 row bands, 360 margin - against the same raster solved
+whole:
+
+| error | cells | within 30 rows of a join | within 60 | within 120 | median distance |
+|---|---|---|---|---|---|
+| > 1 m | 124,948 | 57.8% | 79.5% | 88.3% | 23 rows |
+| > 10 m | 38,347 | 89.5% | 100% | 100% | 8 rows |
+| > 100 m | 964 | 100% | 100% | 100% | 1 row |
+| a uniform spread would give | | 5.7% | 11.6% | 23.2% | 257 rows |
+
+Every cell wrong by more than 100 m sits within 30 rows of a join, and half of
+them within one row. Rendered, the error is not scatter at all: it is a
+horizontal streak on each join, running the width of the drawn ground. The
+worst is a trench at rows 5579-5589 over the join at 5586, where the whole
+solve reads 149-175 m, agreeing with the 150 and 175 contours around it, and
+the banded solve reads 7-73 m. It looks like terrain, which is the part that
+matters - a mapper would believe it.
+
+The error is where it is by construction. A band's margin rows are *pinned* to
+the coarse answer, so the free interior meets a Dirichlet boundary carrying
+1-in-4 detail, and the disagreement surfaces at the first rows inside the
+margin. The margin does work - beyond about 120 rows either side of a join the
+banded and whole solves agree - but it moves the boundary rather than removing
+it.
+
+So widening it is the obvious fix and is not obviously the right one: on
+zone-ellarca, widening the margin from 192 rows to 512 changed the output
+without moving any of these figures. If the pinned value is what is wrong, more
+distance between it and the interior will not help; reconciling across each
+join after the bands are written attacks it directly. Untried, both.
+
+One thing it is **not**: a first attempt that only relaxed each band from the
+coarse answer, rather than solving it, was much worse - p99.9 of 1769 m against
+586 - because relaxation carries information one cell per sweep and the
+contours here are hundreds of cells apart.
 
 So give `--max-mem` the room where you can, and treat the banded second pass as
 a fallback that gets you a map rather than the map.
