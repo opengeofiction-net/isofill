@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.9.0"
+#define ISOFILL_VERSION "0.10.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -23,15 +23,25 @@ typedef struct {
     int barrier;       /* widen constraints for the sight test; --barrier */
     double grad_min;   /* least gradient worth interpolating across; --grad-min */
     int pass2;         /* 1: diffuse the declined cells; 0: --no-pass2 */
-    int threads;       /* OpenMP threads; <= 0 leaves the runtime's setting */
+    int threads;       /* OpenMP threads; <= 0 is all but two, as --threads */
+                       /* 0 used to mean "leave the runtime's setting alone",
+                        * and no longer does: the fill sets the count on every
+                        * call. A host that has chosen its own count and wants
+                        * it kept should pass that number, not a zero. */
 } isofill_params;
 
 /* A version string, so a caller can refuse a library that is not the one it
  * was built against; there is no stable ABI. */
 const char *isofill_version(void);
 
+/* How many threads a given `threads` means: the number itself when positive,
+ * and otherwise all but two, which is the command line's default and now the
+ * library's. Exposed so a caller can say what it is about to do - the binary
+ * prints it - without a second copy of the arithmetic. */
+int isofill_resolve_threads(int threads);
+
 /* The defaults the command line uses when a flag is not given - radius 20,
- * barrier 1, grad_min 0.02, pass 2 on, threads left to the runtime. A caller
+ * barrier 1, grad_min 0.02, pass 2 on, threads all but two. A caller
  * that sets only what it means to set gets the binary's behaviour for the
  * rest, by construction rather than by copying numbers. The binary's own
  * main() starts from this. */

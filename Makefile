@@ -37,8 +37,13 @@ $(LIB): src/isofill.c src/isofill.h
 # the fill between two contours between them and monotonic, the version the
 # header promised. Run against the built library from this directory, which
 # is where the loader finds it on both platforms.
+# $(OPENMP) here too, not because the test threads anything but so that it can
+# ask omp_get_num_procs() what the machine has and check the default against
+# it. Built without it, the test's own _OPENMP is undefined while the
+# library's is defined, and a test that branched on it asserted the
+# single-threaded contract against a threaded library.
 tests/run_lib: tests/run_lib.c $(LIB) src/isofill.h
-	$(CC) $(CFLAGS) -Isrc -o $@ tests/run_lib.c -L. -lisofill $(LDFLAGS)
+	$(CC) $(CFLAGS) $(OPENMP) -Isrc -o $@ tests/run_lib.c -L. -lisofill $(LDFLAGS) $(OPENMP)
 
 install: isofill $(LIB)
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include

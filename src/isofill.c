@@ -861,6 +861,33 @@ const char *isofill_version(void)
     return ISOFILL_VERSION;
 }
 
+/*
+ * All but two cores unless a caller names a number.
+ *
+ * This used to live in main() alone, so the binary left two cores free and
+ * every library caller took the lot - which is what the editor does, on the
+ * machine somebody is drawing on. The default is documented as the binary's
+ * behaviour and now is it: one place for the -2, read by both.
+ *
+ * Measured on a 16 core laptop, a 77.8 M cell fill at 1 arcsecond: all cores
+ * 92.9 s, all but two 98.9, half 120.3, four 158.9. Six and a half per cent
+ * for two cores of headroom, where the comment below used to guess thirty -
+ * that figure is about half the cores, not two of them.
+ */
+int isofill_resolve_threads(int threads)
+{
+#ifdef _OPENMP
+    if (threads <= 0) {
+        threads = omp_get_num_procs() - 2;
+        if (threads < 1) threads = 1;
+    }
+    return threads;
+#else
+    (void) threads;
+    return 1;
+#endif
+}
+
 void isofill_params_default(isofill_params *p)
 {
     p->radius = 20;
@@ -905,7 +932,7 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
         return -1;
     n = (size_t) cols * rows;
 #ifdef _OPENMP
-    if (p->threads > 0) omp_set_num_threads(p->threads);
+    omp_set_num_threads(isofill_resolve_threads(p->threads));
 #endif
     rays = rays_build(p->radius);
     v = malloc(n * sizeof *v);
@@ -1277,14 +1304,12 @@ int main(int argc, char **argv)
     if (!in_path || !out_path) usage();
 #ifdef _OPENMP
     /*
-     * All but two cores by default. util renders tiles and serves the wiki
-     * while this runs, and a fill which takes every core starves them - the
-     * headroom matters more than the last 30% of the speedup.
+     * All but two cores by default - isofill_resolve_threads, which the
+     * library uses for the same reason. util renders tiles and serves the
+     * wiki while this runs, and a fill which takes every core starves them;
+     * the headroom is worth six and a half per cent.
      */
-    if (threads <= 0) {
-        threads = omp_get_num_procs() - 2;
-        if (threads < 1) threads = 1;
-    }
+    threads = isofill_resolve_threads(threads);
     omp_set_num_threads(threads);
     fprintf(stderr, "  %d of %d cores\n", threads, omp_get_num_procs());
 #else
@@ -1400,7 +1425,10 @@ int main(int argc, char **argv)
             }
             p.radius = radius; p.barrier = barrier; p.grad_min = grad_min;
             p.pass2 = do_pass2;
-            p.threads = 0;   /* omp_set_num_threads(threads) ran above, for the whole run; 0 leaves it */
+            /* the number this run resolved to, not a zero: the library
+             * resolves a zero itself now, so a zero here would answer
+             * --threads 4 with all but two */
+            p.threads = threads;
             filled = isofill_run(cons, has_nd, nd, mbuf, wbuf, cols, rows, &p, out);
             free(cons); free(mbuf); free(wbuf);
             if (filled < 0) {
