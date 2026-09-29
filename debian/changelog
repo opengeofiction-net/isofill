@@ -1,3 +1,21 @@
+isofill (0.10.0) unstable; urgency=medium
+
+  * A threads of zero means all but two in the library as well as the command
+    line. The resolution lived in main(), so the binary left two cores free
+    and every library caller quietly took every one - which on a desktop is
+    the machine somebody is working on. isofill_resolve_threads is that
+    arithmetic in one place and both read it. The binary is unchanged: it
+    still prints "14 of 16 cores" and --threads N still wins.
+  * A 77.8 M cell fill on a sixteen core laptop: all cores 92.9 s, all but two
+    98.9, half 120.3, four 158.9. Two cores of headroom cost six and a half
+    per cent, where the comment in main() guessed thirty - thirty is about
+    what half the cores cost.
+  * Zero no longer means "leave the runtime's setting alone", which it did
+    before: the fill sets the count on every call. A host with its own count
+    should pass that number.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Tue, 29 Sep 2026 20:20:34 +0100
+
 isofill (0.9.0) unstable; urgency=medium
 
   * isofill_diffuse(): the second pass on its own, for a caller that wants to

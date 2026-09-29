@@ -75,7 +75,17 @@ writing a value into it, since the solve never moves a cell that is not a
 sentinel, a caller can cut a box out of a larger surface, write the rim from the
 last whole-raster answer, and get the second pass for the box alone. That is an
 approximation - diffusion is global - and how good one is depends on how far a
-change travels in the data at hand. There is no stable ABI:
+change travels in the data at hand.
+
+`isofill_params_default()` hands out the command line's defaults, and that
+includes the threads: a `threads` of zero or less means all but two, the same
+as `--threads`, rather than whatever OpenMP would choose. It did not until
+0.10.0 - the binary left two cores free and every library caller quietly took
+the lot, which on a desktop is the machine the user is working on. On a
+sixteen core laptop, a 77.8 M cell fill: all cores 92.9 s, all but two 98.9,
+half 120.3, four 158.9. Two cores of headroom cost six and a half per cent.
+
+There is no stable ABI:
 `isofill_version()` is there so a caller can refuse a library that is not the
 one it was built against, and `isofill --version` prints the same string.
 `make check` runs the binary and a small program against the library.

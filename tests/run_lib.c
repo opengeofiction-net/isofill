@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "isofill.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #define COLS 32
 #define ROWS 16
@@ -193,9 +196,37 @@ int main(void)
                     return fail("a cell outside the mask was filled");
     }
 
+    /*
+     * What a `threads` of zero means. It used to mean "leave the runtime
+     * alone", which is every core - so the binary left two free and every
+     * library caller took the lot, on a machine somebody might be drawing on.
+     * The header says the defaults are the binary's behaviour; for this one
+     * they were not.
+     */
+    if (isofill_resolve_threads(4) != 4)
+        return fail("a named thread count was not taken as given");
+    if (isofill_resolve_threads(1) != 1)
+        return fail("one thread was not taken as given");
+    {
+        int all = isofill_resolve_threads(-1), zero = isofill_resolve_threads(0);
+        if (all != zero)
+            return fail("zero and a negative count disagree");
+        if (all < 1)
+            return fail("the default resolved to no threads at all");
+#ifdef _OPENMP
+        if (omp_get_num_procs() > 2 && all != omp_get_num_procs() - 2)
+            return fail("the default is not all but two");
+        if (omp_get_num_procs() <= 2 && all != 1)
+            return fail("a small box did not fall back to one thread");
+#else
+        if (all != 1)
+            return fail("without OpenMP the default is not one thread");
+#endif
+    }
+
     printf("libisofill %s: fills between contours, keeps the first pass, "
            "diffuses a box against a written rim, leaves inputs alone, "
-           "refuses nonsense\n",
+           "defaults to all but two cores, refuses nonsense\n",
            isofill_version());
     return 0;
 }
