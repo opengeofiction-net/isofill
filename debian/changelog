@@ -1,3 +1,39 @@
+isofill (0.11.0) unstable; urgency=medium
+
+  * The second pass is solved, not left part way. It was one coarse-to-fine
+    pass of the pyramid, 24 sweeps a level, and stopped there. A coarse cell
+    is fixed at the mean of the fixed cells under it, so a coast drawn as a 0
+    contour beside high ground is a coarse coast at half the land's height,
+    and the sweeps could not take back what that put into the ground beyond:
+    on zone-ellarca 100 to 329 m of ground standing in the sea, in strips
+    whose whole boundary is zero, and a 54 m dent inside a closed 2350 m
+    ring. Against an exact solve it was 3 to 12 m out on tidied ground.
+  * Multigrid cycles now follow the pyramid - the residual gathered down the
+    same levels, a correction solved there and carried back up bilinearly,
+    scaled by the step that minimises the error along it - until a cycle
+    moves no cell by 3 mm, or three cycles together take out less than a
+    tenth: wide flat basins converge slowly, and there the ground is already
+    within a few centimetres. Within 4 mm of an exact solve on gobras and
+    ellarca at 3", and 5.5 cm at 1" on ellarca's 2x2.
+  * The same answer to the bit on any number of threads: the sweeps are
+    red-black, and the line search sums tile by tile and adds the tiles in
+    order.
+  * Faster on small boxes and slower on whole rasters. A loop over a level
+    under 65,536 cells runs on one thread: starting a team for a level a few
+    dozen cells across was most of the second pass on a small box, which is
+    the editor's preview. Against 0.10.1, interleaved in one process: a 200
+    cell box at 3" 0.16 times the time, a 480 cell box at 1" 1.3; whole
+    rasters 1.5 times at 3" on gobras, 4 at 1", and about 17 on ellarca's
+    2x2 at 1".
+  * The output changes, everywhere the second pass fills. tests/pass2_solved
+    asks it of three cases - the coast strip, a ring's floor, random ground
+    against a solve in double precision - and make check runs it.
+  * The second pass's bands, out of core, are sized for the cycles' memory:
+    a third again for the pyramid and a third of a float for the right
+    sides. In core the peak is unchanged, those coming after the masks go.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Mon, 12 Oct 2026 12:42:20 +0100
+
 isofill (0.10.1) unstable; urgency=medium
 
   * The first pass walks a line of sight only to a constraint that can change

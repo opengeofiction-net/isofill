@@ -35,6 +35,9 @@
  *     within radius is skipped in constant time. On a sparse zone - 22 drawn
  *     squares in 153 degrees, for one of ours - that is most of the raster.
  *
+ *   - the second pass solved, not merely relaxed: multigrid cycles after the
+ *     pyramid, until no cell moves by 3 mm.
+
  *   - threads across the rows of a pass, and, above --max-mem, horizontal bands
  *     with a radius of margin so that memory follows the band rather than the
  *     raster. A cell only ever looks radius away, so the banded result is
@@ -547,12 +550,40 @@ static int diffuse(elev *v, unsigned char **water, unsigned char **mask,
  * over a gap five hundred cells wide a fine-grid solve would take thousands of
  * sweeps; each level here starts from the level above and only has to add the
  * detail that level could not carry.
+ *
+ * And then settled, because the pyramid alone is a start and not a solve. A
+ * coarse cell is fixed if any cell under it is, at the mean of those, so a
+ * coast drawn as a 0 contour two cells from high ground answered inland is a
+ * coarse coast at half the land's height, and the 24 sweeps a level cannot
+ * pull back what that put into the ground beyond it: on zone-ellarca, strips
+ * between such a coast and the edge of the drawn area, whose whole boundary is
+ * zero, came out at up to 329 m, and a closed ring at 2350 m held a 54 m dent.
+ * Laplace's answer never leaves the range of its boundary, so both are plainly
+ * wrong. More sweeps at the finest level do settle it, but slowly over wide
+ * ground, and a sweep that moves little says nothing about how far is left:
+ * over a region n cells across what remains can be n/6 times the last step.
+ * So the pyramid is the start, and multigrid cycles finish it - the residual
+ * restricted down the same pyramid, a correction solved for there and carried
+ * back up bilinearly - repeated until a cycle moves no cell by 3 mm, or the
+ * cycles stall. Within 4 mm of an exact solve on gobras and ellarca at 3
+ * arcseconds, and 5.5 cm on ellarca's 2x2 at 1, in basins wide and nearly
+ * flat. 3 mm because a cycle takes out about two thirds of what is left, not
+ * all of it: at 1 cm, with a cruder carry, a ring 200 cells across was left
+ * 8 cm below the contour around it.
  */
 
 
 #define DIFFUSE_SWEEPS 24        /* red and black pairs, at each level */
 #define DIFFUSE_COARSE 200       /* at the coarsest, which is small and cheap */
 #define DIFFUSE_MIN    24        /* stop coarsening below this on either side */
+/* cells below which a pass 2 loop runs on one thread. Starting a team for a
+ * level a few dozen cells across costs more than the sweep: on a 200 cell box
+ * at 3", most of what the second pass took */
+#define PAR_MIN        65536
+#define CYCLE_SMOOTH   2         /* red and black pairs each way, a level, a cycle */
+#define CYCLE_TOL      0.003f    /* metres: done when a cycle moves no cell further */
+#define CYCLE_CAP      60        /* cycles at most, if never settled */
+#define CYCLE_COARSE   30        /* sweeps at the coarsest level, a cycle: a correction, not the answer */
 
 static int is_unset(elev v)
 {
@@ -570,7 +601,7 @@ static void gs_half(float *z, const unsigned char *fx, int cols, int rows,
 {
     int y;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if ((size_t) cols * rows >= PAR_MIN)
 #endif
     for (y = 0; y < rows; y++) {
         size_t r = (size_t) y * cols;
@@ -601,6 +632,251 @@ static void gs_sweeps(float *z, const unsigned char *fx, int cols, int rows,
 }
 
 /*
+ * The tiles of a level with a free cell in them. A tile without one has
+ * nothing to move and nothing left unsolved, so passing it over is exact, and
+ * most of a raster is such tiles - the first pass answers the ground near
+ * contours whole.
+ */
+#define CYCLE_TILE 64
+
+typedef struct {
+    int n, tc;
+    int *t;
+} Tiles;
+
+static int tiles_of(const unsigned char *fx, int cols, int rows, Tiles *T)
+{
+    int tr = (rows + CYCLE_TILE - 1) / CYCLE_TILE, y;
+    unsigned char *has;
+    T->tc = (cols + CYCLE_TILE - 1) / CYCLE_TILE;
+    T->n = 0;
+    has = calloc((size_t) tr * T->tc, 1);
+    T->t = malloc((size_t) tr * T->tc * sizeof *T->t);
+    if (!has || !T->t) { free(has); free(T->t); T->t = NULL; return -2; }
+    for (y = 0; y < rows; y++) {
+        size_t r = (size_t) y * cols;
+        int x;
+        for (x = 0; x < cols; x++)
+            if (!fx[r + x]) has[(size_t) (y / CYCLE_TILE) * T->tc + x / CYCLE_TILE] = 1;
+    }
+    for (y = 0; y < tr * T->tc; y++)
+        if (has[y]) T->t[T->n++] = y;
+    free(has);
+    return 0;
+}
+
+#define TILE_BOUNDS(T, i, cols, rows, y0, y1, x0, x1) do { \
+        int t_ = (T)->t[i]; \
+        y0 = (t_ / (T)->tc) * CYCLE_TILE; x0 = (t_ % (T)->tc) * CYCLE_TILE; \
+        y1 = y0 + CYCLE_TILE; x1 = x0 + CYCLE_TILE; \
+        if (y1 > (rows)) y1 = (rows); \
+        if (x1 > (cols)) x1 = (cols); \
+    } while (0)
+
+/*
+ * A half sweep of 4u - (the four neighbours) = b, for the correction a cycle
+ * solves on a coarse level; b is NULL at the finest, where the equation is the
+ * surface's own. Tiles of one colour's half sweep never touch each other's
+ * cells, so they go in parallel. Returns how far a cell moved at most.
+ */
+static float cycle_half(float *u, const float *b, const unsigned char *fx,
+                        int cols, int rows, const Tiles *T, int parity)
+{
+    int i;
+    float most = 0.0f;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 4) reduction(max:most) if ((size_t) T->n * CYCLE_TILE * CYCLE_TILE >= PAR_MIN)
+#endif
+    for (i = 0; i < T->n; i++) {
+        int y0, y1, x0, x1, y;
+        TILE_BOUNDS(T, i, cols, rows, y0, y1, x0, x1);
+        for (y = y0; y < y1; y++) {
+            size_t r = (size_t) y * cols;
+            int x;
+            for (x = x0 + ((x0 + y + parity) & 1); x < x1; x += 2) {
+                size_t k = r + (size_t) x;
+                float s, v, d;
+                if (fx[k]) continue;
+                s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
+                s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
+                s += (x > 0)        ? u[k - 1]             : 0.0f;
+                s += (x < cols - 1) ? u[k + 1]             : 0.0f;
+                v = (s + (b ? b[k] : 0.0f)) * 0.25f;
+                d = v - u[k];
+                u[k] = v;
+                if (d < 0) d = -d;
+                if (d > most) most = d;
+            }
+        }
+    }
+    return most;
+}
+
+static float cycle_smooth(float *u, const float *b, const unsigned char *fx,
+                          int cols, int rows, const Tiles *T, int n)
+{
+    float most = 0.0f;
+    int i;
+    for (i = 0; i < n; i++) {
+        float m0 = cycle_half(u, b, fx, cols, rows, T, 0);
+        float m1 = cycle_half(u, b, fx, cols, rows, T, 1);
+        if (m0 > most) most = m0;
+        if (m1 > most) most = m1;
+    }
+    return most;
+}
+
+/*
+ * What a level leaves unsolved, gathered into each coarse cell from the sixteen
+ * fine cells around it with the weights the correction is carried back with -
+ * the transpose of the bilinear carry below, so the coarse equation is the fine
+ * one seen through it. Only free cells leave anything; a coarse cell over a
+ * fixed one is fixed, and its correction zero.
+ */
+static inline float cycle_res(const float *u, const float *b, const unsigned char *fx,
+                              int cols, int rows, int x, int y)
+{
+    size_t k;
+    float s;
+    if (x < 0 || y < 0 || x >= cols || y >= rows) return 0.0f;
+    k = (size_t) y * cols + (size_t) x;
+    if (fx[k]) return 0.0f;
+    s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
+    s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
+    s += (x > 0)        ? u[k - 1]             : 0.0f;
+    s += (x < cols - 1) ? u[k + 1]             : 0.0f;
+    return s + (b ? b[k] : 0.0f) - 4.0f * u[k];
+}
+
+static void cycle_restrict(const float *u, const float *b, const unsigned char *fx,
+                           int cols, int rows, const Tiles *T,
+                           float *cb, const unsigned char *cfx, int ccols, int crows)
+{
+    static const float w[4] = { 0.25f, 0.75f, 0.75f, 0.25f };
+    int i;
+    memset(cb, 0, (size_t) ccols * crows * sizeof *cb);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 4) if ((size_t) T->n * CYCLE_TILE * CYCLE_TILE >= PAR_MIN)
+#endif
+    for (i = 0; i < T->n; i++) {
+        int y0, y1, x0, x1, cy;
+        TILE_BOUNDS(T, i, cols, rows, y0, y1, x0, x1);
+        for (cy = y0 / 2; cy < (y1 + 1) / 2 && cy < crows; cy++) {
+            int cx;
+            for (cx = x0 / 2; cx < (x1 + 1) / 2 && cx < ccols; cx++) {
+                double sum = 0;
+                int dy, dx;
+                if (cfx[(size_t) cy * ccols + (size_t) cx]) continue;
+                for (dy = 0; dy < 4; dy++)
+                    for (dx = 0; dx < 4; dx++)
+                        sum += (double) (w[dy] * w[dx])
+                             * cycle_res(u, b, fx, cols, rows, 2 * cx - 1 + dx, 2 * cy - 1 + dy);
+                cb[(size_t) cy * ccols + (size_t) cx] = (float) sum;
+            }
+        }
+    }
+}
+
+/*
+ * The coarse correction carried to each free fine cell, bilinearly from the
+ * four coarse cells nearest it, and scaled by the step that takes the most
+ * error out along it - the one that minimises the energy, alpha = (r . e) /
+ * (e . A e), both sums taken from the coarse values with no fine copy of the
+ * correction made. The coarse equation is only the fine one seen through the
+ * carry where the ground is open; along contours, where coarse cells are fixed
+ * and fine ones beside them are not, it is not, and a fixed step there is too
+ * long somewhere or too short everywhere. Copying the correction to the four
+ * cells under each coarse one was tried first, and took twice as long. Returns
+ * how far a cell moved at most.
+ */
+static inline float cycle_e(const float *ce, int ccols, int crows,
+                            const unsigned char *fx, int cols, int rows, int x, int y)
+{
+    int ix = x / 2, iy = y / 2, jx, jy;
+    float a, b, c, d;
+    if (x < 0 || y < 0 || x >= cols || y >= rows || fx[(size_t) y * cols + x]) return 0.0f;
+    if (ix >= ccols) ix = ccols - 1;
+    if (iy >= crows) iy = crows - 1;
+    /* the near coarse cell three quarters, the next one over a quarter, on each
+     * axis; a coarse cell beyond the raster is zero, as the cells beyond it are */
+    jx = (x & 1) ? ix + 1 : ix - 1;
+    jy = (y & 1) ? iy + 1 : iy - 1;
+    a = ce[(size_t) iy * ccols + (size_t) ix];
+    b = (jx >= 0 && jx < ccols) ? ce[(size_t) iy * ccols + (size_t) jx] : 0.0f;
+    c = (jy >= 0 && jy < crows) ? ce[(size_t) jy * ccols + (size_t) ix] : 0.0f;
+    d = (jx >= 0 && jx < ccols && jy >= 0 && jy < crows) ? ce[(size_t) jy * ccols + (size_t) jx] : 0.0f;
+    return 0.5625f * a + 0.1875f * (b + c) + 0.0625f * d;
+}
+
+static float cycle_prolong(const float *ce, int ccols, int crows, float *u, const float *b,
+                           const unsigned char *fx, int cols, int rows, const Tiles *T,
+                           double *sums)
+{
+    int i;
+    float most = 0.0f;
+    double re_all = 0, eae_all = 0;
+    float alpha;
+    /* the sums tile by tile, in parallel, and added in tile order so the step
+     * is the same however many threads took them: one step for the whole
+     * level, the exact line search. A step a tile was tried, and it is not
+     * one: taken as each was found a tile read its neighbours half moved, and
+     * taken together the steps worked against each other along tile edges */
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 4) if ((size_t) T->n * CYCLE_TILE * CYCLE_TILE >= PAR_MIN)
+#endif
+    for (i = 0; i < T->n; i++) {
+        int y0, y1, x0, x1, y;
+        double re = 0, eae = 0;
+        TILE_BOUNDS(T, i, cols, rows, y0, y1, x0, x1);
+        for (y = y0; y < y1; y++) {
+            int x;
+            for (x = x0; x < x1; x++) {
+                size_t k = (size_t) y * cols + (size_t) x;
+                float e, s, ae;
+                if (fx[k]) continue;
+                e = cycle_e(ce, ccols, crows, fx, cols, rows, x, y);
+                if (e == 0.0f) continue;
+                s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
+                s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
+                s += (x > 0)        ? u[k - 1]             : 0.0f;
+                s += (x < cols - 1) ? u[k + 1]             : 0.0f;
+                ae = 4.0f * e - cycle_e(ce, ccols, crows, fx, cols, rows, x, y - 1)
+                              - cycle_e(ce, ccols, crows, fx, cols, rows, x, y + 1)
+                              - cycle_e(ce, ccols, crows, fx, cols, rows, x - 1, y)
+                              - cycle_e(ce, ccols, crows, fx, cols, rows, x + 1, y);
+                re  += (double) e * ((double) s + (b ? b[k] : 0.0f) - 4.0 * u[k]);
+                eae += (double) e * ae;
+            }
+        }
+        sums[2 * i] = re;
+        sums[2 * i + 1] = eae;
+    }
+    for (i = 0; i < T->n; i++) { re_all += sums[2 * i]; eae_all += sums[2 * i + 1]; }
+    if (eae_all <= 0) return 0.0f;
+    alpha = (float) (re_all / eae_all);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 4) reduction(max:most) if ((size_t) T->n * CYCLE_TILE * CYCLE_TILE >= PAR_MIN)
+#endif
+    for (i = 0; i < T->n; i++) {
+        int y0, y1, x0, x1, y;
+        TILE_BOUNDS(T, i, cols, rows, y0, y1, x0, x1);
+        for (y = y0; y < y1; y++) {
+            int x;
+            for (x = x0; x < x1; x++) {
+                size_t k = (size_t) y * cols + (size_t) x;
+                float d;
+                if (fx[k]) continue;
+                d = alpha * cycle_e(ce, ccols, crows, fx, cols, rows, x, y);
+                u[k] += d;
+                if (d < 0) d = -d;
+                if (d > most) most = d;
+            }
+        }
+    }
+    return most;
+}
+
+/*
  * Coarsen by two. A coarse cell is fixed only if one of the four under it was,
  * and takes the mean of those rather than of all four - so a contour a single
  * cell wide survives being coarsened instead of being averaged away by the
@@ -611,7 +887,7 @@ static void diffuse_restrict(const float *z, const unsigned char *fx, int cols, 
 {
     int cy;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if ((size_t) ccols * crows * 4 >= PAR_MIN)
 #endif
     for (cy = 0; cy < crows; cy++) {
         int cx;
@@ -642,7 +918,7 @@ static void diffuse_prolong(const float *cz, int ccols, int crows,
 {
     int y;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if ((size_t) cols * rows >= PAR_MIN)
 #endif
     for (y = 0; y < rows; y++) {
         int cy = y / 2, x;
@@ -773,6 +1049,51 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
         }
         gs_sweeps(z[i], fx[i], lc[i], lr[i], DIFFUSE_SWEEPS, i);
     }
+
+    /*
+     * The cycles. The coarse levels' values are done with, so their arrays
+     * hold each cycle's correction instead, and b the right side it solves for.
+     */
+    if (n > 1) {
+        float *b[DIFFUSE_LEVELS] = { 0 }, was[3] = { 1e30f, 1e30f, 1e30f };
+        double *sums = NULL;
+        Tiles T[DIFFUSE_LEVELS];
+        int cycle, bad = 0;
+        memset(T, 0, sizeof T);
+        for (i = 0; i < n && !bad; i++) {
+            if (i && !(b[i] = malloc((size_t) lc[i] * lr[i] * sizeof *b[i]))) bad = 1;
+            if (!bad && tiles_of(fx[i], lc[i], lr[i], &T[i]) != 0) bad = 1;
+        }
+        /* two sums a tile for the line search, at the level with the most tiles,
+         * which is the finest */
+        if (!bad && !(sums = malloc((2 * (size_t) T[0].n + 2) * sizeof *sums))) bad = 1;
+        for (cycle = 0; !bad && cycle < CYCLE_CAP; cycle++) {
+            float moved = cycle_smooth(z[0], NULL, fx[0], lc[0], lr[0], &T[0], CYCLE_SMOOTH);
+            for (i = 0; i < n - 1; i++) {
+                if (i > 0) cycle_smooth(z[i], b[i], fx[i], lc[i], lr[i], &T[i], CYCLE_SMOOTH);
+                cycle_restrict(z[i], i ? b[i] : NULL, fx[i], lc[i], lr[i], &T[i],
+                               b[i + 1], fx[i + 1], lc[i + 1], lr[i + 1]);
+                memset(z[i + 1], 0, (size_t) lc[i + 1] * lr[i + 1] * sizeof *z[i + 1]);
+            }
+            cycle_smooth(z[n - 1], b[n - 1], fx[n - 1], lc[n - 1], lr[n - 1], &T[n - 1], CYCLE_COARSE);
+            for (i = n - 2; i >= 0; i--) {
+                float m = cycle_prolong(z[i + 1], lc[i + 1], lr[i + 1], z[i], i ? b[i] : NULL,
+                                        fx[i], lc[i], lr[i], &T[i], sums);
+                float p = cycle_smooth(z[i], i ? b[i] : NULL, fx[i], lc[i], lr[i], &T[i], CYCLE_SMOOTH);
+                if (i == 0) moved += m + p;
+            }
+            if (moved < CYCLE_TOL) break;
+            /* or stalled: three cycles that between them took out less than a
+             * tenth. Wide flat basins converge slowly, and on ellarca's 2x2 at
+             * 1" the cycles sat at 7 mm a cycle from the 15th to the cap, the
+             * ground within 3.5 cm of exact all along */
+            if (moved > 0.9f * was[2]) break;
+            was[2] = was[1]; was[1] = was[0]; was[0] = moved;
+        }
+        for (i = 0; i < n; i++) { free(b[i]); free(T[i].t); }
+        free(sums);
+        if (bad) goto oom;
+    }
     for (i = 1; i < n; i++) { free(z[i]); free(fx[i]); }
     return 0;
 oom:
@@ -813,6 +1134,8 @@ static double diffuse_mb(int cols, int rows)
      * The values and the fixed flag, a third again for the pyramid, and the two
      * mask rasters the caller reads whole and this holds until they have been
      * classified. Leaving those two out understated zone-axian by 4.2 GB.
+     * The cycles' right sides, a third of a float a cell, come after the masks
+     * are let go, so the peak is still this one.
      */
     return (cells * ((4.0 + 1.0) * (1.0 + 1.0 / 3.0) + 2.0)) / (1024 * 1024);
 }
@@ -1188,9 +1511,11 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
     {
         /* a band holds the values, the solve, the fixed flag, the void flag and
          * the two masks - twelve bytes a cell with an elev at four, not the
-         * seven this said while an elev was a short */
+         * seven this said while an elev was a short - and the solve's pyramid
+         * on top: a third again of the values and the fixed flag, and since
+         * 0.11.0 a third of a float for the cycles' right sides, three more */
         int band_rows = (int) (budget / ((double) cols *
-                        (2.0 * sizeof(elev) + 4.0)));
+                        (2.0 * sizeof(elev) + 4.0 + 3.0)));
         int done = 0;
         if (band_rows < 2 * margin) band_rows = 2 * margin;
         free(v); free(mbuf); free(wbuf);
