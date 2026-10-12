@@ -221,7 +221,9 @@ static Rays *rays_build(int radius)
     free(tmpx); free(tmpy);
 
     /* where each offset sits in the nearest-first order, for a search that
-     * meets them by row instead */
+     * meets them by row instead. half is the circle off was built from - the
+     * same dx*dx + dy*dy <= radius*radius - so every cell a row walk meets has
+     * a rank but the centre, which radius_value has returned on already */
     {
         int w = 2 * radius + 1;
         r->rank = malloc((size_t) w * w * sizeof *r->rank);
