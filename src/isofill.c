@@ -581,7 +581,8 @@ static int diffuse(elev *v, unsigned char **water, unsigned char **mask,
  * at 3", most of what the second pass took */
 #define PAR_MIN        65536
 #define CYCLE_SMOOTH   2         /* red and black pairs each way, a level, a cycle */
-#define CYCLE_TOL      0.003f    /* metres: done when a cycle moves no cell of the finest level further */
+#define CYCLE_TOL      0.003f    /* metres: done when a cycle can have moved no cell of the finest level
+                                  * further - the largest moves of its stages there, summed, a bound */
 #define CYCLE_CAP      60        /* cycles at most, if never settled */
 #define CYCLE_COARSE   30        /* sweeps at the coarsest level, a cycle: a correction, not the answer */
 
@@ -1065,7 +1066,7 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
             if (!bad && tiles_of(fx[i], lc[i], lr[i], &T[i]) != 0) bad = 1;
         }
         /* two sums a tile for the line search, at the level with the most tiles,
-         * which is the finest */
+         * which is the finest: halving a level never adds a tile */
         if (!bad && !(sums = malloc((2 * (size_t) T[0].n + 2) * sizeof *sums))) bad = 1;
         for (cycle = 0; !bad && cycle < CYCLE_CAP; cycle++) {
             float moved = cycle_smooth(z[0], NULL, fx[0], lc[0], lr[0], &T[0], CYCLE_SMOOTH);
