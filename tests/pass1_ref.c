@@ -14,7 +14,7 @@
 #define ISOFILL_NO_MAIN
 #include "../src/isofill.c"
 
-static int ref_capped = 0;   /* set from every thread, only ever to 1 */
+static int ref_capped = 0;   /* set from every thread, atomically, only ever to 1 */
 
 static elev radius_value_ref(const Band *b, const Rays *r, int radius,
                               double grad_min, int barrier, int x0, int y0)
@@ -53,7 +53,12 @@ static elev radius_value_ref(const Band *b, const Rays *r, int radius,
             elev val = b->v[(size_t) y * b->cols + x];
             for (k = 0; k < nlev; k++)
                 if (lev[k] == val) break;
-            if (k == nlev && nlev == MAX_LEVELS) ref_capped = 1;
+            if (k == nlev && nlev == MAX_LEVELS) {
+#ifdef _OPENMP
+#pragma omp atomic write
+#endif
+                ref_capped = 1;
+            }
             if (k == nlev && nlev < MAX_LEVELS) {
                 lev[nlev] = val;
                 dst[nlev] = o->dist;
@@ -162,12 +167,12 @@ static int compare(int cols, int rows, int radius, int barrier, int lines, int l
                 elev a = radius_value(&b, r, radius, 0.02, barrier, xx, y);
                 elev e = radius_value_ref(&b, r, radius, 0.02, barrier, xx, y);
                 if (memcmp(&a, &e, sizeof a) != 0) {
+                    bad = 1;               /* the thread's own, or'd together at the end */
 #ifdef _OPENMP
 #pragma omp critical
 #endif
                     fprintf(stderr, "pass1_ref: radius %d barrier %d, cell %d,%d: %.9g, the walk gives %.9g\n",
                             radius, barrier, xx, y, a, e);
-                    bad = 1;
                 }
                 nc++;
                 if (a != NO_ELEV && a != OUT_OF_REACH && a != ONE_LEVEL) nv++;
