@@ -6,3 +6,5 @@ tests/run_lib
 tests/run_lib.exe
 tests/pass1_ref
 tests/pass1_ref.exe
+tests/pass2_solved
+tests/pass2_solved.exe

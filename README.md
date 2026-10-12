@@ -176,7 +176,16 @@ by its own coastline needs no such help: bounded by cells at zero, Laplace gives
 zero throughout.
 
 It is solved coarse to fine, because relaxation moves information one cell per
-sweep and the gaps are hundreds of cells wide.
+sweep and the gaps are hundreds of cells wide - and then solved properly, since
+0.11.0. One pass down the pyramid is a start, not a solve: a coarse cell is fixed
+at the mean of the fixed cells under it, so a coast drawn as a 0 contour beside
+high ground is a coarse coast at half the land's height, and on zone-ellarca the
+ground beyond such a coast stood up to 329 m in the sea. Multigrid cycles finish
+it, until a cycle moves no cell by 3 mm or the cycles stall - within 4 mm of an
+exact solve at 3 arcseconds, and a few centimetres at 1 in wide flat basins. The
+cost is on whole rasters: against 0.10.1, 1.5 times at 3" and 4 at 1" on gobras,
+and about 17 on ellarca's 2x2 at 1". On a small box, the editor's preview, it is
+quicker than it was.
 
 Three sets of cells are held at zero rather than solved for, and each was needed:
 
@@ -329,7 +338,10 @@ See [LICENSE](LICENSE).
 ## Known
 
 Near a shore, isofill leaves more stray elevation in open water than the process it
-reimplements, in streaks a few metres high. Rasterising all touched and
+reimplements, in streaks a few metres high. Some of it, at least, was the second
+pass left unconverged - 0.11.0 solves it, and ground whose whole boundary is zero
+now comes out at zero - and what remains of the streaks has not been measured
+again since. Rasterising all touched and
 `--barrier 2` together remove a little over a quarter of it. The cause of the rest
 is **not known**: three explanations were tested and each refuted by measurement -
 the fill walking around the end of an open coastline way, which closed coastlines
