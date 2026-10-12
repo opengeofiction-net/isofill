@@ -1,3 +1,21 @@
+isofill (0.10.1) unstable; urgency=medium
+
+  * The first pass walks a line of sight only to a constraint that can change
+    its answer. A cell's value uses the nearest cell in sight of each distinct
+    level, so a constraint at a level already seen nearer - most of them, on
+    a contour - is not looked at, and nor is a new level farther than all
+    sixty-four held. Only the cells which carry a value are visited, a row of
+    the search circle at a time, by a table of how far each cell is from the
+    next constraint along its row; the constraint flag it replaces was a byte
+    too, so it costs no memory.
+  * The same answer to the bit: tests/pass1_ref keeps the walk it replaced
+    and compares the two on every cell of random rasters, the level cap
+    among them, and make check runs it. Over danu's sets the binary's output
+    is identical, and faster: ellarca at 3" 5.21 to 2.73 s, N20E086 at 1"
+    41.3 to 15.4 s, N20E087 at 1" 30.4 to 16.7 s.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Mon, 12 Oct 2026 09:56:57 +0100
+
 isofill (0.10.0) unstable; urgency=medium
 
   * A threads of zero means all but two in the library as well as the command
