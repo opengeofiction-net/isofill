@@ -24,6 +24,13 @@
  *     exact and turns an O(k^2) search over every sample into one over the
  *     handful of distinct levels in view.
  *
+ *   - and so a constraint at a level already seen nearer is not looked at: no
+ *     line of sight is walked to it, since whether it is in sight cannot change
+ *     the answer. Only the cells which carry a value are visited, a row of the
+ *     search circle at a time, by a table of how far each cell is from the next
+ *     constraint along its row. The same answer to the bit, at about a quarter
+ *     of the line-of-sight steps.
+ *
  *   - a summed area table over the constraint mask, so a cell with nothing
  *     within radius is skipped in constant time. On a sparse zone - 22 drawn
  *     squares in 153 degrees, for one of ours - that is most of the raster.
@@ -110,6 +117,8 @@ typedef struct {
     short *px, *py;      /* the point pool, all offsets' lines end to end */
     Offset *off;
     int noff;
+    int *rank;           /* (dy + radius) * (2 radius + 1) + (dx + radius) -> index in off, or -1 */
+    int *half;           /* half[|dy|]: the widest |dx| in the circle on that row */
 } Rays;
 
 /* GDALRasterIO is warn_unused_result; where a failure is not actionable - a
@@ -210,12 +219,30 @@ static Rays *rays_build(int radius)
         used += n;
     }
     free(tmpx); free(tmpy);
+
+    /* where each offset sits in the nearest-first order, for a search that
+     * meets them by row instead. half is the circle off was built from - the
+     * same dx*dx + dy*dy <= radius*radius - so every cell a row walk meets has
+     * a rank but the centre, which radius_value has returned on already */
+    {
+        int w = 2 * radius + 1;
+        r->rank = malloc((size_t) w * w * sizeof *r->rank);
+        r->half = malloc((size_t) (radius + 1) * sizeof *r->half);
+        for (i = 0; i < w * w; i++) r->rank[i] = -1;
+        for (i = 0; i < r->noff; i++)
+            r->rank[(r->off[i].dy + radius) * w + (r->off[i].dx + radius)] = i;
+        for (dy = 0; dy <= radius; dy++) {
+            for (dx = radius; dx > 0 && dx * dx + dy * dy > radius * radius; dx--)
+                ;
+            r->half[dy] = dx;
+        }
+    }
     return r;
 }
 
 static void rays_free(Rays *r)
 {
-    free(r->px); free(r->py); free(r->off); free(r);
+    free(r->px); free(r->py); free(r->off); free(r->rank); free(r->half); free(r);
 }
 
 /* ------------------------------------------------------------------ pass 1 */
@@ -225,8 +252,11 @@ static void rays_free(Rays *r)
 typedef struct {
     int rows, cols;
     elev *v;
-    unsigned char *is;    /* a constraint: carries a value */
-    unsigned char *blk;   /* blocks sight: is, widened by --barrier */
+    /* 0 on a constraint - a cell that carries a value; anywhere else how far
+     * it is to the next constraint along the row, or to the row's end, at most
+     * 255. A byte, as the flag it replaces was: the jump costs no memory */
+    unsigned char *run;
+    unsigned char *blk;   /* blocks sight: the constraints, widened by --barrier */
     long long *sat;
 } Band;
 
@@ -254,7 +284,10 @@ static void dilate(Band *b, int n)
 
     b->blk = malloc((size_t) b->cols * b->rows);
     if (!b->blk) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
-    memcpy(b->blk, b->is, (size_t) b->cols * b->rows);
+    {
+        size_t i, m = (size_t) b->cols * b->rows;
+        for (i = 0; i < m; i++) b->blk[i] = b->run[i] == 0;
+    }
     if (n <= 0) return;
 
     tmp = malloc((size_t) b->cols * b->rows);
@@ -276,7 +309,7 @@ static void dilate(Band *b, int n)
 
 static inline int have(const Band *b, int x, int y)
 {
-    return x >= 0 && x < b->cols && y >= 0 && y < b->rows && b->is[(size_t) y * b->cols + x];
+    return x >= 0 && x < b->cols && y >= 0 && y < b->rows && b->run[(size_t) y * b->cols + x] == 0;
 }
 
 /* constraints within the radius box, in constant time */
@@ -304,7 +337,7 @@ static void build_sat(Band *b)
     for (y = 0; y < b->rows; y++)
         for (x = 0; x < b->cols; x++)
             b->sat[(size_t)(y + 1) * w + (x + 1)] =
-                b->is[(size_t) y * b->cols + x]
+                (b->run[(size_t) y * b->cols + x] == 0)
                 + b->sat[(size_t) y * w + (x + 1)]
                 + b->sat[(size_t)(y + 1) * w + x]
                 - b->sat[(size_t) y * w + x];
@@ -313,13 +346,13 @@ static void build_sat(Band *b)
 static int g_explain_x = -1, g_explain_y = -1;
 
 static elev radius_value(const Band *b, const Rays *r, int radius,
-                          double grad_min, int barrier, int x0, int y0,
-                          unsigned char *blocked)
+                          double grad_min, int barrier, int x0, int y0)
 {
     int explain = (x0 == g_explain_x && y0 == g_explain_y);
     elev lev[MAX_LEVELS];
     float dst[MAX_LEVELS];
-    int nlev = 0, i, j, k;
+    int first[MAX_LEVELS];       /* the nearest-first index of the nearest in sight */
+    int nlev = 0, i, j, k, t, W = 2 * radius + 1;
     double best = -1e30, out = 0;
 
     if (have(b, x0, y0))
@@ -327,46 +360,90 @@ static elev radius_value(const Band *b, const Rays *r, int radius,
     if (sat_count(b, x0 - radius, y0 - radius, x0 + radius, y0 + radius) == 0)
         return OUT_OF_REACH;
 
-    for (i = 0; i < r->noff; i++) {
-        const Offset *o = &r->off[i];
-        int x = x0 + o->dx, y = y0 + o->dy, p, blk = 0;
-
-        if (!have(b, x, y))
-            continue;
-        for (p = 0; p < o->n; p++) {
-            int px = r->px[o->first + p], py = r->py[o->first + p];
-            int adx = abs(px - o->dx), ady = abs(py - o->dy);
-            /*
-             * Near the target use the exact mask, so a constraint is never
-             * hidden behind its own widening; everywhere else use the widened
-             * one. Chebyshev, because the dilation is square.
-             */
-            int hit = ((adx > barrier || ady > barrier)
-                       ? blocks(b, x0 + px, y0 + py)
-                       : have(b, x0 + px, y0 + py));
-            if (hit) {
-                blk = 1;
-                break;
-            }
-        }
-        if (blk)
-            continue;
-        {
-            elev val = b->v[(size_t) y * b->cols + x];
-            /* nearest-first, so an elevation already seen is already nearer */
+    /*
+     * What is wanted is, for each distinct elevation, the nearest of its cells
+     * in sight - and of those, the MAX_LEVELS nearest. Nearness is the index in
+     * the nearest-first order of the offsets, which is the order a walk of them
+     * would meet the cells in, ties and all, so the answer is the one that walk
+     * gives.
+     *
+     * The circle is met a row at a time instead, the rows outward from the
+     * cell's own so that the near levels are found early, and along each row
+     * only the constraints, by the run table. A constraint whose level is
+     * already held at a nearer index cannot change anything, and neither can a
+     * new level farther than all MAX_LEVELS held: no line of sight is walked to
+     * either, and most of the walking was to those.
+     */
+    for (t = 0; t <= 2 * radius; t++) {
+        int dy = (t & 1) ? (t + 1) / 2 : -(t / 2);
+        int y = y0 + dy, xs, xe, x;
+        const unsigned char *run;
+        if (y < 0 || y >= b->rows) continue;
+        xs = x0 - r->half[abs(dy)]; xe = x0 + r->half[abs(dy)];
+        if (xs < 0) xs = 0;
+        if (xe >= b->cols) xe = b->cols - 1;
+        run = b->run + (size_t) y * b->cols;
+        for (x = xs; x <= xe; ) {
+            int d = run[x], oi, p, blk = 0, worst = -1;
+            const Offset *o;
+            elev val;
+            if (d) { x += d; continue; }
+            oi = r->rank[(dy + radius) * W + (x - x0 + radius)];
+            val = b->v[(size_t) y * b->cols + x];
+            x++;
             for (k = 0; k < nlev; k++)
                 if (lev[k] == val) break;
-            if (k == nlev && nlev < MAX_LEVELS) {
-                lev[nlev] = val;
-                dst[nlev] = o->dist;
-                nlev++;
-                if (explain)
-                    fprintf(stderr, "    sees %8.2f m at %6.2f cells, offset %+d%+d\n",
-                            val, o->dist, o->dx, o->dy);
+            if (k < nlev) {
+                if (oi > first[k]) continue;
+            } else if (nlev == MAX_LEVELS) {
+                for (worst = 0, i = 1; i < nlev; i++)
+                    if (first[i] > first[worst]) worst = i;
+                if (oi > first[worst]) continue;
+            }
+            o = &r->off[oi];
+            for (p = 0; p < o->n; p++) {
+                int px = r->px[o->first + p], py = r->py[o->first + p];
+                int adx = abs(px - o->dx), ady = abs(py - o->dy);
+                /*
+                 * Near the target use the exact mask, so a constraint is never
+                 * hidden behind its own widening; everywhere else use the widened
+                 * one. Chebyshev, because the dilation is square.
+                 */
+                int hit = ((adx > barrier || ady > barrier)
+                           ? blocks(b, x0 + px, y0 + py)
+                           : have(b, x0 + px, y0 + py));
+                if (hit) {
+                    blk = 1;
+                    break;
+                }
+            }
+            if (blk)
+                continue;
+            if (k < nlev)
+                first[k] = oi;
+            else if (nlev < MAX_LEVELS) {
+                lev[nlev] = val; first[nlev] = oi; nlev++;
+            } else {
+                lev[worst] = val; first[worst] = oi;
             }
         }
     }
-    (void) blocked;
+    /* nearest first, as the pairs below are taken in that order */
+    for (i = 1; i < nlev; i++) {
+        elev lv = lev[i];
+        int fi = first[i];
+        for (j = i - 1; j >= 0 && first[j] > fi; j--) {
+            lev[j + 1] = lev[j]; first[j + 1] = first[j];
+        }
+        lev[j + 1] = lv; first[j + 1] = fi;
+    }
+    for (i = 0; i < nlev; i++) {
+        const Offset *o = &r->off[first[i]];
+        dst[i] = o->dist;
+        if (explain)
+            fprintf(stderr, "    sees %8.2f m at %6.2f cells, offset %+d%+d\n",
+                    lev[i], o->dist, o->dx, o->dy);
+    }
 
     for (i = 0; i < nlev; i++)
         for (j = 0; j < nlev; j++) {
@@ -814,14 +891,19 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
     Band b;
     b.cols = cols; b.rows = bh;
     b.v = v;
-    b.is = malloc((size_t) cols * bh);
-    if (!b.is) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+    b.run = malloc((size_t) cols * bh);
+    if (!b.run) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
     {
-        size_t k, n = (size_t) cols * bh;
-        for (k = 0; k < n; k++) {
-            int isc = has_nd ? (b.v[k] != (elev) nd) : (b.v[k] != NO_ELEV);
-            b.is[k] = (unsigned char) isc;
-            if (!isc) b.v[k] = NO_ELEV;
+        int yy;
+        for (yy = 0; yy < bh; yy++) {
+            int x, next = cols;            /* the next constraint at or right of x */
+            for (x = cols - 1; x >= 0; x--) {
+                size_t k = (size_t) yy * cols + x;
+                int isc = has_nd ? (b.v[k] != (elev) nd) : (b.v[k] != NO_ELEV);
+                if (isc) next = x;
+                else b.v[k] = NO_ELEV;
+                b.run[k] = (unsigned char) (next - x > 255 ? 255 : next - x);
+            }
         }
     }
     build_sat(&b);
@@ -845,12 +927,12 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
                     ? b.v[(size_t) (y + margin) * cols + xx] : OUT_OF_REACH;
                 continue;
             }
-            val = radius_value(&b, rays, radius, grad_min, barrier, xx, y + margin, NULL);
+            val = radius_value(&b, rays, radius, grad_min, barrier, xx, y + margin);
             out[k] = val;
             if (val != NO_ELEV && val != OUT_OF_REACH && val != ONE_LEVEL) filled++;
         }
     }
-    free(b.is); free(b.blk); free(b.sat);
+    free(b.run); free(b.blk); free(b.sat);
     return filled;
 }
 

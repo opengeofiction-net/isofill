@@ -42,6 +42,12 @@ $(LIB): src/isofill.c src/isofill.h
 # it. Built without it, the test's own _OPENMP is undefined while the
 # library's is defined, and a test that branched on it asserted the
 # single-threaded contract against a threaded library.
+# The first pass against the walk it replaced, cell for cell; see the test.
+# It includes src/isofill.c to reach the static functions, so it is built from
+# the source rather than linked to the library.
+tests/pass1_ref: tests/pass1_ref.c src/isofill.c src/isofill.h
+	$(CC) $(CFLAGS) $(OPENMP) $(GDAL_CFLAGS) -o $@ tests/pass1_ref.c $(GDAL_LIBS) $(LDFLAGS) $(OPENMP) -lm
+
 tests/run_lib: tests/run_lib.c $(LIB) src/isofill.h
 	$(CC) $(CFLAGS) $(OPENMP) -Isrc -o $@ tests/run_lib.c -L. -lisofill $(LDFLAGS) $(OPENMP)
 
@@ -56,7 +62,7 @@ install: isofill $(LIB)
 # the exit status isofill gives after printing usage, which is 2, and the
 # first line of that usage text exactly. A loader error can manage one of
 # those; not both. Then the library, through the test program.
-check: isofill tests/run_lib
+check: isofill tests/run_lib tests/pass1_ref
 	@out=$$(./isofill 2>&1); st=$$?; \
 	if [ $$st -ne 2 ]; then echo "expected exit 2 after usage, got $$st"; exit 1; fi; \
 	printf '%s\n' "$$out" | head -1 | grep -qx 'usage: isofill \[options\] <constraints.tif> <out.tif>' \
@@ -66,8 +72,9 @@ check: isofill tests/run_lib
 		&& echo "isofill --version agrees with isofill.h" \
 		|| { echo "isofill --version disagrees with isofill.h"; exit 1; }
 	@LD_LIBRARY_PATH=. PATH=".:$$PATH" ./tests/run_lib
+	@./tests/pass1_ref
 
 clean:
-	rm -f isofill $(LIB) tests/run_lib
+	rm -f isofill $(LIB) tests/run_lib tests/pass1_ref
 
 .PHONY: all install check clean

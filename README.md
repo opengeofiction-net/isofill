@@ -317,7 +317,10 @@ the history alone. It is kept in `original/` for reference and is not built.
 
 What is ours rather than the original's is in the header of `src/isofill.c`: only
 the nearest constraint at each distinct elevation is kept, which is exact and turns
-an O(k²) search into one over the handful of levels in view; the summed area table;
+an O(k²) search into one over the handful of levels in view - and so no line of
+sight is walked to a constraint at a level already seen nearer, and only the cells
+which carry a value are visited, which since 0.10.1 makes the first pass two to
+three times faster with the same answer to the bit; the summed area table;
 banding; threading; and the reach and barrier rules above.
 
 Licensed Artistic 1.0 or GPL 1 or later, inherited from the code it derives from.
