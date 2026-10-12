@@ -581,7 +581,7 @@ static int diffuse(elev *v, unsigned char **water, unsigned char **mask,
  * at 3", most of what the second pass took */
 #define PAR_MIN        65536
 #define CYCLE_SMOOTH   2         /* red and black pairs each way, a level, a cycle */
-#define CYCLE_TOL      0.003f    /* metres: done when a cycle moves no cell further */
+#define CYCLE_TOL      0.003f    /* metres: done when a cycle moves no cell of the finest level further */
 #define CYCLE_CAP      60        /* cycles at most, if never settled */
 #define CYCLE_COARSE   30        /* sweeps at the coarsest level, a cycle: a correction, not the answer */
 
@@ -1512,8 +1512,9 @@ static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
         /* a band holds the values, the solve, the fixed flag, the void flag and
          * the two masks - twelve bytes a cell with an elev at four, not the
          * seven this said while an elev was a short - and the solve's pyramid
-         * on top: a third again of the values and the fixed flag, and since
-         * 0.11.0 a third of a float for the cycles' right sides, three more */
+         * on top, three bytes more in all: a third again of the values and the
+         * fixed flag, five thirds, and since 0.11.0 a third of a float for the
+         * cycles' right sides, four thirds */
         int band_rows = (int) (budget / ((double) cols *
                         (2.0 * sizeof(elev) + 4.0 + 3.0)));
         int done = 0;

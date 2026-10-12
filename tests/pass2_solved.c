@@ -11,7 +11,9 @@
  *     levels saw the coast and the land as one, and the 24 sweeps at the
  *     finest level left the strip at up to 329 m.
  *   - a hilltop: a closed ring at 2350 m with a wide unanswered floor.
- *   - random ground, against a solve in double precision taken to 1e-9.
+ *   - random ground, against a solve in double precision, swept until no cell
+ *     moves by 1e-9 - with the boundary isofill_diffuse has, zero beyond the
+ *     raster's edge, which is what lets open sea run off the side of a zone.
  *
  * And the same answer to the bit on one thread as on all of them, which the
  * golden surface in danu relies on: the solve is red-black, and its line
@@ -121,7 +123,9 @@ int main(void)
         if (worst > 0.02) fail("random ground is not the solve", worst);
     }
 
-    /* one thread against all: the coast strip again, which takes cycles and settling both */
+    /* one thread against all: the coast strip again, with the land sloping along
+     * it so no two tiles see the same ground and an order that mattered would
+     * show. Only where there are threads to count */
 #ifdef _OPENMP
     {
         enum { C = 400, R = 120, COAST = 70, EDGE = 100 };
@@ -143,7 +147,7 @@ int main(void)
 #endif
     if (failed) return 1;
     printf("libisofill %s: the second pass solved - the strip between a 0 coast and the drawn "
-           "edge within %.4f m of 0, a ring's floor within %.4f m of the ring, random ground "
+           "edge within %.4f m of 0, a ring's floor within %.4f m of 2350, random ground "
            "within %.4f m of the exact answer\n", isofill_version(), w_strip, w_ring, w_random);
     return 0;
 }
