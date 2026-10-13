@@ -54,6 +54,11 @@ tests/pass1_ref: tests/pass1_ref.c src/isofill.c src/isofill.h
 tests/pass2_solved: tests/pass2_solved.c $(LIB) src/isofill.h
 	$(CC) $(CFLAGS) $(OPENMP) -Isrc -o $@ tests/pass2_solved.c -L. -lisofill $(LDFLAGS) $(OPENMP) -lm
 
+# The second pass out of core against the same raster solved whole, to the
+# bit: the binary run twice, the second time with no memory to speak of.
+tests/pass2_ooc: tests/pass2_ooc.c
+	$(CC) $(CFLAGS) $(GDAL_CFLAGS) -o $@ tests/pass2_ooc.c $(GDAL_LIBS) $(LDFLAGS) -lm
+
 tests/run_lib: tests/run_lib.c $(LIB) src/isofill.h
 	$(CC) $(CFLAGS) $(OPENMP) -Isrc -o $@ tests/run_lib.c -L. -lisofill $(LDFLAGS) $(OPENMP)
 
@@ -68,7 +73,7 @@ install: isofill $(LIB)
 # the exit status isofill gives after printing usage, which is 2, and the
 # first line of that usage text exactly. A loader error can manage one of
 # those; not both. Then the library, through the test program.
-check: isofill tests/run_lib tests/pass1_ref tests/pass2_solved
+check: isofill tests/run_lib tests/pass1_ref tests/pass2_solved tests/pass2_ooc
 	@out=$$(./isofill 2>&1); st=$$?; \
 	if [ $$st -ne 2 ]; then echo "expected exit 2 after usage, got $$st"; exit 1; fi; \
 	printf '%s\n' "$$out" | head -1 | grep -qx 'usage: isofill \[options\] <constraints.tif> <out.tif>' \
@@ -80,8 +85,9 @@ check: isofill tests/run_lib tests/pass1_ref tests/pass2_solved
 	@LD_LIBRARY_PATH=. PATH=".:$$PATH" ./tests/run_lib
 	@./tests/pass1_ref
 	@LD_LIBRARY_PATH=. PATH=".:$$PATH" ./tests/pass2_solved
+	@./tests/pass2_ooc
 
 clean:
-	rm -f isofill $(LIB) tests/run_lib tests/pass1_ref tests/pass2_solved
+	rm -f isofill $(LIB) tests/run_lib tests/pass1_ref tests/pass2_solved tests/pass2_ooc
 
 .PHONY: all install check clean

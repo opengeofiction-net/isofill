@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.11.0"
+#define ISOFILL_VERSION "0.12.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.

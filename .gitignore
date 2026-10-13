@@ -8,3 +8,6 @@ tests/pass1_ref
 tests/pass1_ref.exe
 tests/pass2_solved
 tests/pass2_solved.exe
+tests/pass2_ooc
+tests/pass2_ooc.exe
+tests/isofill-pass2-ooc-*

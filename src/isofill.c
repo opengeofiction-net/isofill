@@ -43,9 +43,9 @@
  *     raster. A cell only ever looks radius away, so the banded result is
  *     identical to the whole raster one, not an approximation of it. The
  *     summed area table is what forces this: eight bytes a cell, twenty
- *     gigabytes on a zone of 2.5 gigapixels. Pass 2 cannot band the same way,
- *     since its columns run the full height, so it goes to a temporary in
- *     column strips and is combined back in row chunks.
+ *     gigabytes on a zone of 2.5 gigapixels. Pass 2 cannot band the same way -
+ *     diffusion is global - so it is the same solve over arrays kept in files
+ *     beside the output where they will not fit, and as exact (big_alloc).
  *
  * SPDX-License-Identifier: Artistic-1.0 OR GPL-1.0-or-later
  * Copyright (c) 2017-2020 Thilo Stapff
@@ -60,6 +60,17 @@
 #include <gdal.h>
 #include <cpl_conv.h>
 #include <cpl_string.h>
+
+#ifndef ISOFILL_NO_MAIN
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -492,6 +503,144 @@ static elev radius_value(const Band *b, const Rays *r, int radius,
 }
 
 /* ------------------------------------------------------------------ pass 2 */
+
+/*
+ * The second pass's raster-sized arrays, and where they live.
+ *
+ * In memory, as malloc and calloc would give them - always, in the library.
+ * The binary can be told to keep any that will not fit in what is left of
+ * --max-mem in a file instead, mapped into memory, so the solve for a raster
+ * too large to hold is the same solve: the same code over the same arrays,
+ * the kernel paging them in and out as the sweeps go past. Every step of it
+ * reads and writes whole rows in order or tiles of them, so what it pages is
+ * a pass over the file rather than a scatter across it. A raster forced out
+ * of core is then the raster solved whole, to the bit - which the banded
+ * approximation it replaces never was: on zone-ellarca a tenth of a percent
+ * of cells off by hundreds of metres, every one on a band join or in ground
+ * the coarse grid it decided void on took for void.
+ *
+ * A file is created in the directory given, unlinked at once - it is never
+ * seen, and goes when the process does however it goes - and sized with
+ * ftruncate, so it reads as zeros: calloc's promise, kept. On Windows it is
+ * opened delete-on-close and sized by the mapping, to the same effect.
+ */
+static struct {
+    int on;                 /* files allowed at all: the binary, out of core */
+    double left;            /* bytes of the budget not yet taken in memory */
+    double filed;           /* bytes ever put in files, for the log */
+    const char *dir;
+    struct { void *p; size_t n; int file; } *a;
+    int na, cap;
+} big;
+
+#ifndef ISOFILL_NO_MAIN
+#ifdef _WIN32
+static void *map_file(const char *dir, size_t n)
+{
+    static unsigned serial;
+    char path[4096];
+    HANDLE f = INVALID_HANDLE_VALUE, m;
+    void *p;
+    int tries;
+    for (tries = 0; tries < 100 && f == INVALID_HANDLE_VALUE; tries++) {
+        if (snprintf(path, sizeof path, "%s/isofill-pass2-%lu-%u", dir,
+                     (unsigned long) GetCurrentProcessId(), serial++) >= (int) sizeof path)
+            return NULL;    /* cut short, it names some other directory */
+        f = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+        if (f == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) return NULL;
+    }
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    /* the mapping extends the file to n, in zeros; the view holds the file
+     * open, so the handles can go and the file with the view */
+    m = CreateFileMappingA(f, NULL, PAGE_READWRITE, (DWORD) ((unsigned long long) n >> 32),
+                           (DWORD) n, NULL);
+    p = m ? MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, n) : NULL;
+    if (m) CloseHandle(m);
+    CloseHandle(f);
+    return p;
+}
+
+static void unmap_file(void *p, size_t n)
+{
+    (void) n;
+    UnmapViewOfFile(p);
+}
+#else
+static void *map_file(const char *dir, size_t n)
+{
+    char path[4096];
+    void *p;
+    int fd;
+    if (snprintf(path, sizeof path, "%s/isofill-pass2-XXXXXX", dir) >= (int) sizeof path)
+        return NULL;        /* cut short, it names some other directory */
+    fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    unlink(path);
+    if (ftruncate(fd, (off_t) n) != 0) { close(fd); return NULL; }
+    p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    return p == MAP_FAILED ? NULL : p;
+}
+
+static void unmap_file(void *p, size_t n)
+{
+    munmap(p, n);
+}
+#endif
+#endif
+
+static void *big_alloc(size_t n, int zero)
+{
+    void *p = NULL;
+    int file = 0;
+    if (big.on && (double) n > big.left) {
+#ifndef ISOFILL_NO_MAIN
+        p = map_file(big.dir ? big.dir : ".", n);
+        if (!p) return NULL;
+        file = 1;
+        big.filed += (double) n;
+#endif
+    } else {
+        p = zero ? calloc(n ? n : 1, 1) : malloc(n ? n : 1);
+        if (!p) return NULL;
+        if (big.on) big.left -= (double) n;
+    }
+    if (big.on) {
+        if (big.na == big.cap) {
+            int cap = big.cap ? 2 * big.cap : 64;
+            void *a = realloc(big.a, (size_t) cap * sizeof *big.a);
+            if (!a) {
+#ifndef ISOFILL_NO_MAIN
+                if (file) unmap_file(p, n); else
+#endif
+                free(p);
+                return NULL;
+            }
+            big.a = a; big.cap = cap;
+        }
+        big.a[big.na].p = p; big.a[big.na].n = n; big.a[big.na].file = file;
+        big.na++;
+    }
+    return p;
+}
+
+static void big_free(void *p)
+{
+    int i;
+    if (!p) return;
+    for (i = 0; i < big.na; i++)
+        if (big.a[i].p == p) {
+#ifndef ISOFILL_NO_MAIN
+            if (big.a[i].file) unmap_file(p, big.a[i].n);
+            else
+#endif
+            { free(p); big.left += (double) big.a[i].n; }
+            big.a[i] = big.a[--big.na];
+            return;
+        }
+    free(p);                /* one made before the files were allowed */
+}
 
 static int diffuse(elev *v, unsigned char **water, unsigned char **mask,
                    int cols, int rows);
@@ -959,7 +1108,7 @@ static void diffuse_prolong(const float *cz, int ccols, int crows,
 static int mark_void(const unsigned char *oor, const unsigned char *mask,
                      int cols, int rows, unsigned char **out)
 {
-    unsigned char *vd = calloc((size_t) cols * rows, 1);
+    unsigned char *vd = big_alloc((size_t) cols * rows, 1);
     int y, x, pass, changed;
     *out = NULL;
     if (!vd) return -2;
@@ -1013,9 +1162,9 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
     while (n < DIFFUSE_LEVELS &&
            lc[n - 1] > DIFFUSE_MIN && lr[n - 1] > DIFFUSE_MIN) {
         int cc = (lc[n - 1] + 1) / 2, cr = (lr[n - 1] + 1) / 2;
-        z[n] = malloc((size_t) cc * cr * sizeof *z[n]);
-        fx[n] = malloc((size_t) cc * cr);
-        if (!z[n] || !fx[n]) { free(z[n]); free(fx[n]); goto oom; }
+        z[n] = big_alloc((size_t) cc * cr * sizeof *z[n], 0);
+        fx[n] = big_alloc((size_t) cc * cr, 0);
+        if (!z[n] || !fx[n]) { big_free(z[n]); big_free(fx[n]); goto oom; }
         diffuse_restrict(z[n - 1], fx[n - 1], lc[n - 1], lr[n - 1],
                          z[n], fx[n], cc, cr);
         lc[n] = cc; lr[n] = cr;
@@ -1025,7 +1174,7 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
     gs_sweeps(z[n - 1], fx[n - 1], lc[n - 1], lr[n - 1], DIFFUSE_COARSE, n - 1);
     for (i = n - 2; i >= 0; i--) {
         size_t m = (size_t) lc[i] * lr[i], j;
-        float *fine = (i == 0) ? NULL : malloc(m * sizeof *fine);
+        float *fine = (i == 0) ? NULL : big_alloc(m * sizeof *fine, 0);
         if (i && !fine) goto oom;
         if (!fine) {
             /* the finest level is the caller's array. Prolong into the unknowns
@@ -1045,7 +1194,7 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
         } else {
             diffuse_prolong(z[i + 1], lc[i + 1], lr[i + 1], fine, lc[i], lr[i]);
             for (j = 0; j < m; j++) if (fx[i][j]) fine[j] = z[i][j];
-            free(z[i]);
+            big_free(z[i]);
             z[i] = fine;
         }
         gs_sweeps(z[i], fx[i], lc[i], lr[i], DIFFUSE_SWEEPS, i);
@@ -1062,7 +1211,7 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
         int cycle, bad = 0;
         memset(T, 0, sizeof T);
         for (i = 0; i < n && !bad; i++) {
-            if (i && !(b[i] = malloc((size_t) lc[i] * lr[i] * sizeof *b[i]))) bad = 1;
+            if (i && !(b[i] = big_alloc((size_t) lc[i] * lr[i] * sizeof *b[i], 0))) bad = 1;
             if (!bad && tiles_of(fx[i], lc[i], lr[i], &T[i]) != 0) bad = 1;
         }
         /* two sums a tile for the line search, at the level with the most tiles,
@@ -1091,37 +1240,19 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows)
             if (moved > 0.9f * was[2]) break;
             was[2] = was[1]; was[1] = was[0]; was[0] = moved;
         }
-        for (i = 0; i < n; i++) { free(b[i]); free(T[i].t); }
+        for (i = 0; i < n; i++) { big_free(b[i]); free(T[i].t); }
         free(sums);
         if (bad) goto oom;
     }
-    for (i = 1; i < n; i++) { free(z[i]); free(fx[i]); }
+    for (i = 1; i < n; i++) { big_free(z[i]); big_free(fx[i]); }
     return 0;
 oom:
     /* the coarse levels this had built; z[0] and fx[0] are the caller's */
-    for (i = 1; i < n; i++) { free(z[i]); free(fx[i]); }
+    for (i = 1; i < n; i++) { big_free(z[i]); big_free(fx[i]); }
     return -2;
 }
 
-/* Which cells are held, and at what. */
-#ifndef ISOFILL_NO_MAIN   /* the out-of-core path's helpers; see the fence below */
-static void classify(const elev *v, const unsigned char *water,
-                     const unsigned char *mask, const unsigned char *vd,
-                     float *z, unsigned char *fx, size_t cells)
-{
-    size_t k;
-    for (k = 0; k < cells; k++) {
-        if ((mask && !mask[k]) || (vd && vd[k]) || (water && water[k])) {
-            fx[k] = 1;
-            z[k] = 0.0f;
-        } else {
-            int unset = is_unset(v[k]);
-            fx[k] = (unsigned char) !unset;
-            z[k] = unset ? 0.0f : (float) v[k];
-        }
-    }
-}
-
+#ifndef ISOFILL_NO_MAIN   /* the binary's alone */
 /*
  * What diffuse needs, in megabytes, to hold a raster of this size: the caller's
  * Int16 buffer, a float and a byte a cell for the solve, and a third again for
@@ -1148,25 +1279,25 @@ static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
     const unsigned char *water = waterp ? *waterp : NULL;
     const unsigned char *mask = maskp ? *maskp : NULL;
     size_t k, cells = (size_t) cols * rows;
-    unsigned char *oor = calloc(cells, 1), *vd;
-    unsigned char *fx = malloc(cells);
+    unsigned char *oor = big_alloc(cells, 1), *vd;
+    unsigned char *fx = big_alloc(cells, 0);
 
     /* the masks are this function's to free however it leaves, so a caller
      * that handed them over never has to wonder */
     if (!oor || !fx) {
-        free(oor); free(fx);
-        if (waterp) { free(*waterp); *waterp = NULL; }
-        if (maskp)  { free(*maskp);  *maskp  = NULL; }
+        big_free(oor); big_free(fx);
+        if (waterp) { big_free(*waterp); *waterp = NULL; }
+        if (maskp)  { big_free(*maskp);  *maskp  = NULL; }
         return -2;
     }
     for (k = 0; k < cells; k++) oor[k] = (v[k] == OUT_OF_REACH);
     if (mark_void(oor, mask, cols, rows, &vd) != 0) {
-        free(oor); free(fx);
-        if (waterp) { free(*waterp); *waterp = NULL; }
-        if (maskp)  { free(*maskp);  *maskp  = NULL; }
+        big_free(oor); big_free(fx);
+        if (waterp) { big_free(*waterp); *waterp = NULL; }
+        if (maskp)  { big_free(*maskp);  *maskp  = NULL; }
         return -2;
     }
-    free(oor);
+    big_free(oor);
 
     /*
      * Solved in place. The caller's array is float and so is the solve, so the
@@ -1185,12 +1316,12 @@ static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
     }
     /* the masks and the void flags have all been read into fx by now, and the
      * solve is the largest thing here - let them go before it starts */
-    free(vd);
-    if (waterp) { free(*waterp); *waterp = NULL; }
-    if (maskp)  { free(*maskp);  *maskp  = NULL; }
+    big_free(vd);
+    if (waterp) { big_free(*waterp); *waterp = NULL; }
+    if (maskp)  { big_free(*maskp);  *maskp  = NULL; }
     {
         int rc = solve_pyramid(v, fx, cols, rows);
-        free(fx);
+        big_free(fx);
         return rc;
     }
 }
@@ -1403,201 +1534,6 @@ int isofill_diffuse(float *surface, const unsigned char *mask,
  * main. Compiled out of the library with -DISOFILL_NO_MAIN. */
 #ifndef ISOFILL_NO_MAIN
 
-/*
- * The same solve, for a raster too large to hold.
- *
- * Only the finest level is a problem: coarsening by two divides the cells by
- * four, so zone-axian's 2.1 gigapixels are 131 million three levels down, which
- * fits several times over. So the pyramid is entered part way up - the fine
- * rasters are read once, in row groups, and restricted straight into a coarse
- * grid held in memory - and the answer is carried back down band by band.
- *
- * The band pass is not a tiled solve. Each band starts from the coarse answer,
- * which already carries the shape of the whole zone, and only has to add the
- * detail the coarse grid could not hold; a margin of a few hundred rows either
- * side is far more than that correction travels, so the bands agree where they
- * meet. Solving each band from cold would seam, which is the mistake the linear
- * pass's own tiling makes.
- */
-
-static void diffuse_ooc(GDALRasterBandH p1b, GDALRasterBandH mb,
-                        GDALRasterBandH wb, GDALRasterBandH ob,
-                        int cols, int rows, double max_mem, int margin)
-{
-    int shift = 0, cc, cr, band, y;
-    size_t ccells;
-    float *cz;
-    unsigned char *cfx, *cvd, *coor, *cout_of_mask;
-    elev *v;
-    unsigned char *mbuf = NULL, *wbuf = NULL;
-    double budget = max_mem * 1024.0 * 1024.0 * 0.45;
-
-    /* how far up the pyramid we have to start for the grid to fit */
-    for (shift = 1; shift < 8; shift++) {
-        double n = ((double) cols / (1 << shift)) * ((double) rows / (1 << shift));
-        if (n * 12.0 <= budget) break;
-    }
-    cc = (cols + (1 << shift) - 1) >> shift;
-    cr = (rows + (1 << shift) - 1) >> shift;
-    ccells = (size_t) cc * cr;
-    fprintf(stderr, "  pass 2: coarse grid %dx%d, 1 in %d, then %d row bands\n",
-            cc, cr, 1 << shift, 1 << shift);
-    fprintf(stderr, "isofill: warning - --pass2 diffuse out of core is an "
-            "approximation. On zone-ellarca, forced out of core and compared\n"
-            "  against the same zone solved whole: 95%% of cells identical, "
-            "95th percentile 0 m, but a tenth\n"
-            "  of a percent differ by hundreds of metres. Give --max-mem the "
-            "room to hold the raster if you can.\n");
-
-    cz = calloc(ccells, sizeof *cz);
-    cfx = calloc(ccells, 1);
-    coor = malloc(ccells);
-    cout_of_mask = malloc(ccells);
-    if (!cz || !cfx || !coor || !cout_of_mask) {
-        fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1);
-    }
-    memset(coor, 1, ccells);
-    memset(cout_of_mask, 1, ccells);
-    {
-        float *acc = calloc(ccells, sizeof *acc);
-        int *nfix = calloc(ccells, sizeof *nfix);
-        int step = 1 << shift;
-        if (!acc || !nfix) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
-        v = malloc((size_t) cols * step * sizeof *v);
-        if (mb) mbuf = malloc((size_t) cols * step);
-        if (wb) wbuf = malloc((size_t) cols * step);
-        if (!v || (mb && !mbuf) || (wb && !wbuf)) {
-            fprintf(stderr, "isofill: out of memory\n"); exit(1);
-        }
-        for (y = 0; y < rows; y += step) {
-            int h = (y + step <= rows) ? step : rows - y, yy;
-            IO_(GDALRasterIO(p1b, GF_Read, 0, y, cols, h, v, cols, h, GDT_Float32, 0, 0));
-            if (mb) IO_(GDALRasterIO(mb, GF_Read, 0, y, cols, h, mbuf, cols, h, GDT_Byte, 0, 0));
-            if (wb) IO_(GDALRasterIO(wb, GF_Read, 0, y, cols, h, wbuf, cols, h, GDT_Byte, 0, 0));
-            for (yy = 0; yy < h; yy++) {
-                size_t r = (size_t) yy * cols, cr_off = (size_t) ((y + yy) >> shift) * cc;
-                int x;
-                for (x = 0; x < cols; x++) {
-                    size_t k = r + (size_t) x, ck = cr_off + (size_t) (x >> shift);
-                    if (!(mb && !mbuf[k])) cout_of_mask[ck] = 0;
-                    if (v[k] != OUT_OF_REACH) coor[ck] = 0;
-                    if (!is_unset(v[k]) && !(wb && wbuf[k]) && !(mb && !mbuf[k])) {
-                        acc[ck] += (float) v[k];
-                        nfix[ck]++;
-                    }
-                }
-            }
-        }
-        for (ccells = (size_t) cc * cr, y = 0; (size_t) y < ccells; y++) {
-            if (nfix[y]) { cfx[y] = 1; cz[y] = acc[y] / nfix[y]; }
-        }
-        free(acc); free(nfix);
-    }
-    for (y = 0; (size_t) y < ccells; y++) if (cout_of_mask[y]) coor[y] = 1;
-    /* the binary still dies loudly where the library reports: this is a batch
-     * run of one zone, and there is nothing useful to hand back to */
-    if (mark_void(coor, mb ? cout_of_mask : NULL, cc, cr, &cvd) != 0) {
-        fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1);
-    }
-    for (y = 0; (size_t) y < ccells; y++)
-        if (cvd[y] || cout_of_mask[y]) { cfx[y] = 1; cz[y] = 0.0f; }
-    free(coor); free(cout_of_mask);
-
-    if (solve_pyramid(cz, cfx, cc, cr) != 0) {
-        fprintf(stderr, "isofill: out of memory for pass 2\n"); exit(1);
-    }
-    free(cfx);
-
-    /* carry it back down, a band of rows at a time */
-    {
-        /* a band holds the values, the solve, the fixed flag, the void flag and
-         * the two masks - twelve bytes a cell with an elev at four, not the
-         * seven this said while an elev was a short - and the solve's pyramid
-         * on top, three bytes more in all: a third again of the values and the
-         * fixed flag, five thirds, and since 0.11.0 a third of a float for the
-         * cycles' right sides, four thirds */
-        int band_rows = (int) (budget / ((double) cols *
-                        (2.0 * sizeof(elev) + 4.0 + 3.0)));
-        int done = 0;
-        if (band_rows < 2 * margin) band_rows = 2 * margin;
-        free(v); free(mbuf); free(wbuf);
-        for (band = 0; band < rows; band += band_rows) {
-            int h = (band + band_rows <= rows) ? band_rows : rows - band;
-            int y0 = band - margin, y1 = band + h + margin, bh, oy, x;
-            size_t n;
-            float *z; unsigned char *fx, *vd;
-            if (y0 < 0) y0 = 0;
-            if (y1 > rows) y1 = rows;
-            bh = y1 - y0; oy = band - y0; n = (size_t) cols * bh;
-
-            v = malloc(n * sizeof *v);
-            z = malloc(n * sizeof *z);
-            fx = malloc(n);
-            vd = malloc(n);
-            mbuf = mb ? malloc(n) : NULL;
-            wbuf = wb ? malloc(n) : NULL;
-            if (!v || !z || !fx || !vd || (mb && !mbuf) || (wb && !wbuf)) {
-                fprintf(stderr, "isofill: out of memory for a pass 2 band\n"); exit(1);
-            }
-            IO_(GDALRasterIO(p1b, GF_Read, 0, y0, cols, bh, v, cols, bh, GDT_Float32, 0, 0));
-            if (mb) IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, bh, mbuf, cols, bh, GDT_Byte, 0, 0));
-            if (wb) IO_(GDALRasterIO(wb, GF_Read, 0, y0, cols, bh, wbuf, cols, bh, GDT_Byte, 0, 0));
-
-            /* the void is decided on the coarse grid, where the whole zone is
-             * visible; a band on its own cannot see where a region reaches */
-            for (y = 0; y < bh; y++)
-                for (x = 0; x < cols; x++) {
-                    size_t k = (size_t) y * cols + (size_t) x;
-                    size_t ck = (size_t) ((y0 + y) >> shift) * cc + (size_t) (x >> shift);
-                    vd[k] = (unsigned char) (v[k] == OUT_OF_REACH && cvd[ck]);
-                }
-            classify(v, wbuf, mbuf, vd, z, fx, n);
-            /* z is the band's own array here, not the caller's - the band is
-             * read from the raster and written back to it, so there is nothing
-             * to solve in place over */
-            /*
-             * The band is solved properly, not merely relaxed. Sweeping alone
-             * carries information one cell at a time, and in sparse ground the
-             * contours are hundreds of cells apart, so the band would keep
-             * whatever the coarse grid gave it and the joins would show.
-             *
-             * What makes a band solvable on its own is a boundary, and the
-             * coarse answer is one: the rows in the margin are held at it, top
-             * and bottom, so each band is a complete problem whose edges agree
-             * with its neighbours by construction. The margin is then thrown
-             * away and only the interior kept.
-             */
-            for (y = 0; y < bh; y++) {
-                int in_margin = (y0 + y < band && y0 > 0) ||
-                                (y0 + y >= band + h && y1 < rows);
-                for (x = 0; x < cols; x++) {
-                    size_t k = (size_t) y * cols + (size_t) x;
-                    size_t ck = (size_t) ((y0 + y) >> shift) * cc + (size_t) (x >> shift);
-                    if (in_margin) { fx[k] = 1; z[k] = cz[ck]; }
-                    else if (!fx[k]) z[k] = cz[ck];
-                }
-            }
-            if (solve_pyramid(z, fx, cols, bh) != 0) {
-                fprintf(stderr, "isofill: out of memory for a pass 2 band\n"); exit(1);
-            }
-
-            for (y = 0; y < h; y++)
-                for (x = 0; x < cols; x++) {
-                    size_t k = (size_t) (oy + y) * cols + (size_t) x;
-                    v[k] = (elev) z[k];
-                }
-            IO_(GDALRasterIO(ob, GF_Write, 0, band, cols, h,
-                             v + (size_t) oy * cols, cols, h, GDT_Float32, 0, 0));
-            free(v); free(z); free(fx); free(vd); free(mbuf); free(wbuf);
-            done += h;
-            fprintf(stderr, "\r  pass 2 %d%%", (int) (100.0 * done / rows));
-        }
-        fprintf(stderr, "\r  pass 2 complete, %d bands with %d margin\n",
-                (rows + band_rows - 1) / band_rows, margin);
-    }
-    free(cz); free(cvd);
-}
-
 /* ------------------------------------------------------------------ main */
 
 static void usage(void)
@@ -1619,11 +1555,11 @@ static void usage(void)
         "  --mask FILE    a raster the size of the constraints: where it is zero\n"
         "                 no cell is filled, though contours there still count as\n"
         "                 evidence for cells outside it\n"
-        "  --pass2-margin N   rows of overlap between the second pass's bands\n"
-        "                 when the raster will not fit in --max-mem, each\n"
-        "                 discarded after use (default 6 * radius)\n"
-        "  --max-mem MB   above this, work band by band through a temporary\n"
-        "                 beside the output (default 4096)\n"
+        "  --pass2-margin N   accepted and ignored. The second pass out of\n"
+        "                 core was banded, and this was the bands' overlap\n"
+        "  --max-mem MB   above this, the first pass works band by band and the\n"
+        "                 second keeps what will not fit in files beside the\n"
+        "                 output; the answer is the same (default 4096)\n"
         "  --threads N    (default: all but two, to leave the box usable)\n"
         "  --version      print the version and exit\n");
     exit(2);
@@ -1682,7 +1618,7 @@ int main(int argc, char **argv)
     isofill_params d;
     int radius, do_pass2, threads, i;
     double grad_min, max_mem = 4096;
-    int p2_margin = -1, barrier;
+    int barrier;
 
     /* the one place the defaults live; the library hands out the same */
     isofill_params_default(&d);
@@ -1697,7 +1633,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--water") && i + 1 < argc) water_path = argv[++i];
         else if (!strcmp(argv[i], "--barrier") && i + 1 < argc) barrier = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-reach")) ;   /* was a switch, now the only behaviour */
-        else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) p2_margin = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) ++i;   /* the bands' overlap, gone */
         else if (!strcmp(argv[i], "--no-pass2")) do_pass2 = 0;
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--version")) { printf("isofill %s\n", ISOFILL_VERSION); return 0; }
@@ -1768,16 +1704,6 @@ int main(int argc, char **argv)
             wb = GDALGetRasterBand(wat, 1);
         }
         rays = rays_build(radius);
-
-        /*
-         * Whole raster by default. The original bounded this to a 512 tile with
-         * a 128 margin, and reproducing that was worth measuring, but it buys
-         * nothing here: on alved it moves the water carrying 10 m or more not at
-         * all, and shifts the land by a median of 1 m for the trouble. Left as an
-         * option because it is the only thing which bounds how far a value
-         * carries when there is no mask to bound it.
-         */
-        if (p2_margin < 0) p2_margin = 6 * radius;
 
         whole_mb = isofill_whole_mb(cols, rows);
 
@@ -1860,18 +1786,17 @@ int main(int argc, char **argv)
         } else {
             /*
              * Too large. Pass 1 runs band by band into a temporary, and pass 2
-             * reads that back a strip and a row at a time. The temporaries sit
-             * beside the output, so the output directory needs the room.
+             * reads that back and solves it whole, its arrays in files where
+             * they will not fit. Both sit beside the output, so the output
+             * directory needs the room.
              */
-            char t1[4096], t2[4096], t3[4096];
+            char t1[4096];
             GDALDatasetH p1;
             int h, y0, band_rows;
             elev *out;
             double per_row;
 
             snprintf(t1, sizeof t1, "%s.pass1.tif", out_path);
-            snprintf(t2, sizeof t2, "%s.pv.tif", out_path);
-            snprintf(t3, sizeof t3, "%s.gv.tif", out_path);
 
             /* Rows that fit: the values and the output are an elev each and the
              * constraint flag a byte, so nine bytes a cell, and the summed area
@@ -1923,45 +1848,42 @@ int main(int argc, char **argv)
             GDALSetGeoTransform(dst, gt);
             GDALSetProjection(dst, GDALGetProjectionRef(src));
             if (do_pass2) {
-                /* a multiple of the 256 tile, so a strip write lands on
-                 * whole tiles rather than straddling them */
-                int strip = (int) ((max_mem / 3) * 1024 * 1024 / (rows * 3.0));
-                int chunk = (int) ((max_mem / 5) * 1024 * 1024 / (cols * 9.0));
-                strip = (strip / 256) * 256;
-                if (strip < 256) strip = 256;
-                if (strip > cols) strip = cols;
-                chunk = (chunk / 256) * 256;
-                if (chunk < 256) chunk = 256;
-                if (chunk > rows) chunk = rows;
-                fprintf(stderr, "  pass 2: %d column strips, %d row chunks\n",
-                        (cols + strip - 1) / strip, (rows + chunk - 1) / chunk);
-                if (diffuse_mb(cols, rows) <= max_mem) {
+                {
                     /*
-                     * The first pass banded and the second does not have to.
-                     * They are separate decisions because the two paths are not
-                     * of equal standing: the first pass reads each band with a
-                     * radius margin, so every interior cell sees its whole
-                     * search circle and a banded run is exact. The second pass
-                     * banded is an approximation. So where there is room for
-                     * the solve but not for the first pass's summed-area table
-                     * - which is most of the gap, at eight bytes a cell - take
-                     * it, and keep the exact answer.
+                     * The whole raster's solve, in memory or not. The first
+                     * pass banded and the second does not have to: where there
+                     * is room for the solve but not for the first pass's
+                     * summed-area table - most of the gap, at eight bytes a
+                     * cell - it is held. Where there is not, the arrays that
+                     * will not fit in --max-mem go to files beside the output
+                     * and the same solve runs over them (see big_alloc), so the
+                     * answer is the same to the bit either way.
                      */
-                    elev *whole = malloc((size_t) cols * rows * sizeof *whole);
+                    int held = diffuse_mb(cols, rows) <= max_mem;
+                    elev *whole;
                     unsigned char *wm = NULL, *mm = NULL;
+                    char *dir = CPLStrdup(CPLGetPath(out_path));
+                    if (!held) {
+                        big.on = 1;
+                        big.left = max_mem * 1024.0 * 1024.0;
+                        big.dir = dir[0] ? dir : ".";
+                    }
+                    whole = big_alloc((size_t) cols * rows * sizeof *whole, 0);
                     if (!whole) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
-                    fprintf(stderr, "  pass 2: whole raster, %.0f MB of %.0f\n",
+                    fprintf(stderr, held ? "  pass 2: whole raster, %.0f MB of %.0f\n"
+                                         : "  pass 2: whole raster, %.0f MB against %.0f - "
+                                           "what will not fit in a file beside the output\n",
                             diffuse_mb(cols, rows), max_mem);
                     IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Read, 0, 0,
                                      cols, rows, whole, cols, rows, GDT_Float32, 0, 0));
                     if (wb) {
-                        wm = malloc((size_t) cols * rows);
+                        wm = big_alloc((size_t) cols * rows, 0);
                         if (!wm) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                         IO_(GDALRasterIO(wb, GF_Read, 0, 0, cols, rows, wm, cols, rows,
                                          GDT_Byte, 0, 0));
                     }
                     if (mb) {
-                        mm = malloc((size_t) cols * rows);
+                        mm = big_alloc((size_t) cols * rows, 0);
                         if (!mm) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                         IO_(GDALRasterIO(mb, GF_Read, 0, 0, cols, rows, mm, cols, rows,
                                          GDT_Byte, 0, 0));
@@ -1975,12 +1897,18 @@ int main(int argc, char **argv)
                      * zeroing the linear path needed is already done */
                     IO_(GDALRasterIO(GDALGetRasterBand(dst, 1), GF_Write, 0, 0,
                                      cols, rows, whole, cols, rows, GDT_Float32, 0, 0));
-                    free(whole); free(wm); free(mm);
+                    big_free(whole);
+                    if (!held)
+                        fprintf(stderr, "  pass 2: %.0f bytes of its arrays were in files\n", big.filed);
+                    /* every array is freed by now; the record goes with them,
+                     * so nothing after can be taken for one in a file */
+                    big.on = 0;
+                    big.dir = NULL;
+                    free(big.a);
+                    big.a = NULL;
+                    big.na = big.cap = 0;
+                    CPLFree(dir);
                     fprintf(stderr, "  pass 2 complete\n");
-                } else {
-                    diffuse_ooc(GDALGetRasterBand(p1, 1), mb, wb,
-                                GDALGetRasterBand(dst, 1), cols, rows, max_mem,
-                                p2_margin);
                 }
             } else {
                 elev *row = malloc((size_t) cols * sizeof *row);
@@ -1996,7 +1924,7 @@ int main(int argc, char **argv)
             }
             GDALClose(dst);
             GDALClose(p1);
-            VSIUnlink(t1); VSIUnlink(t2); VSIUnlink(t3);
+            VSIUnlink(t1);
         }
 
         if (msk) GDALClose(msk);
