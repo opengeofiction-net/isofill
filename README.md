@@ -100,9 +100,9 @@ one it was built against, and `isofill --version` prints the same string.
 | `--mask FILE` | fill only where this raster is non-zero |
 | `--no-reach` | let the second pass carry values past the radius |
 | `--no-pass2` | leave the cells the first pass declined unset |
-| `--pass2-margin N` | rows of overlap between the second pass's bands when the raster will not fit in `--max-mem` |
+| `--pass2-margin N` | accepted and ignored: the overlap of the bands the second pass used to be solved in out of core |
 | `--water FILE` | a raster the size of the constraints: where it is not zero the cell is water, held at zero by `--pass2 diffuse` |
-| `--max-mem MB` | above this, work band by band. Default 4096. The two passes decide separately; see below |
+| `--max-mem MB` | above this, the first pass works band by band and the second keeps what will not fit in files beside the output - the same answer either way. Default 4096; see below |
 | `--threads N` | default: all but two |
 | `--explain X Y` | say what one cell could see and what it did with it |
 
@@ -218,79 +218,38 @@ N32E067_Ellarca, where the first pass answers a third of the ground: the same
 difference 0 m, 95th percentile 3 m - and the longest run of axis-aligned steps
 falls from 487 cells to 76.
 
-**The two passes decide banding separately**, because the two banded paths are
-not of equal standing. The first pass reads each band with a `--radius` margin,
-so every interior cell still sees its whole search circle and a banded run is
-**exact** - forcing it to band on zone-ellarca while the second pass holds the
-raster gives output identical to the last bit, 100.0000% of cells and a maximum
-difference of 0 m. The second pass banded is an approximation. So where there is
-room for the solve but not for the first pass's summed area table - most of the
-gap, at eight bytes a cell against the solve's seven and a third - it is taken,
-and the exact answer kept.
+**Above `--max-mem`, both passes give the answer they give in memory.** The
+first pass reads each band with a `--radius` margin, so every interior cell still
+sees its whole search circle and a banded run is exact - forcing it to band on
+zone-ellarca gives output identical to the last bit.
 
-For OGF that means `--max-mem 20480` puts every zone's second pass in memory:
-the largest, zone-yuethon at 46801 square, wants 19.0 GB for the solve against
-26.5 GB to hold its first pass whole.
+The second pass is the same solve over the same arrays: those that will not fit
+in what is left of `--max-mem` are kept in files beside the output, mapped into
+memory, and the kernel pages them in and out as the solve goes past. Every step
+of the solve reads rows in order, or tiles of them, so what it pages is a pass
+over each file rather than a scatter across it. The files are unlinked as soon as
+they are made, so nothing is left behind however the run ends; they want the
+disk the solve would have wanted in memory, about nine bytes a cell.
 
-Below that it is solved out of core, and **that path is an approximation**. It
-enters the pyramid part way up - the fine rasters are read once and restricted
-straight into a coarse grid that fits - and carries the answer back down in
-bands, each solved with its margin rows held at the coarse answer so
-neighbouring bands agree by construction. `--pass2-margin` sets that overlap.
+It replaced a banded approximation (to 0.11.0), which solved a coarse grid
+whole and then each band of rows against it, the band's margin rows pinned to
+the coarse answer and its void decided on the coarse grid. Both were measured
+wrong by hundreds of metres: every cell off by more than 100 m on the gobras
+3x3 at 1 arcsecond sat within 30 rows of a band join, and on zone-ellarca 28% of
+them were enclosed ground the coarse grid took for void. Against the same
+raster solved whole, at the same `--max-mem`:
 
-Measured by forcing zone-ellarca out of core and comparing against itself solved
-whole: 95% of cells identical, 95th percentile 0 m, and a tenth of a percent
-differing by hundreds of metres. Of those, 28% are cells the banded path calls
-void and the whole solve does not - the coarse grid deciding connectivity at 1
-in 4 rather than cell by cell - and the rest is each band solving a different
-problem from the whole raster.
+| raster | cells | banded (0.11.0): off by > 1 m | > 100 m | worst | files (0.12.0) | time, whole / banded / files |
+|---|---|---|---|---|---|---|
+| zone-ellarca, 3", `--max-mem 150` | 21.6 M | 888,964 | 310,572 | 1,933 m | identical | 3.1 / 3.9 / 3.7 s |
+| gobras, 1", `--max-mem 500` | 259 M | 180,803 | 294 | 218 m | identical | 45 / 56 / 74 s |
+| zone-yuethon, 3", `--max-mem 512` | 243 M | 18,402 | 1 | 145 m | identical | 9.9 / 13.4 / 13.8 s |
 
-**It is the band joins, and that was measured wrong the first time.** This said
-it was not, on the strength of the error away from a join averaging 5.30 m
-against 6.45 m within a hundred rows of one. A mean over every cell cannot
-show it: the cells that are badly wrong are a thousandth of the raster, so they
-move that mean by nothing. Asked where the *large* errors are rather than where
-the average error is, the answer is unambiguous.
-
-Measured on the gobras 3x3 at 1 arcsecond, 10801x7201, forced out of core with
-`--max-mem 256` - 931 row bands, 360 margin - against the same raster solved
-whole:
-
-| error | cells | within 30 rows of a join | within 60 | within 120 | median distance |
-|---|---|---|---|---|---|
-| > 1 m | 124,948 | 57.8% | 79.5% | 88.3% | 23 rows |
-| > 10 m | 38,347 | 89.5% | 100% | 100% | 8 rows |
-| > 100 m | 964 | 100% | 100% | 100% | 1 row |
-| a uniform spread would give | | 5.7% | 11.6% | 23.2% | 257 rows |
-
-Every cell wrong by more than 100 m sits within 30 rows of a join, and half of
-them within one row. Rendered, the error is not scatter at all: it is a
-horizontal streak on each join, running the width of the drawn ground. The
-worst is a trench at rows 5579-5589 over the join at 5586, where the whole
-solve reads 149-175 m, agreeing with the 150 and 175 contours around it, and
-the banded solve reads 7-73 m. It looks like terrain, which is the part that
-matters - a mapper would believe it.
-
-The error is where it is by construction. A band's margin rows are *pinned* to
-the coarse answer, so the free interior meets a Dirichlet boundary carrying
-1-in-4 detail, and the disagreement surfaces at the first rows inside the
-margin. The margin does work - beyond about 120 rows either side of a join the
-banded and whole solves agree - but it moves the boundary rather than removing
-it.
-
-So widening it is the obvious fix and is not obviously the right one: on
-zone-ellarca, widening the margin from 192 rows to 512 changed the output
-without moving any of these figures. If the pinned value is what is wrong, more
-distance between it and the interior will not help; reconciling across each
-join after the bands are written attacks it directly. Untried, both.
-
-One thing it is **not**: a first attempt that only relaxed each band from the
-coarse answer, rather than solving it, was much worse - p99.9 of 1769 m against
-586 - because relaxation carries information one cell per sweep and the
-contours here are hundreds of cells apart.
-
-So give `--max-mem` the room where you can, and treat the banded second pass as
-a fallback that gets you a map rather than the map.
+Gobras at 1 arcsecond was run in a cgroup capped at 1.2 GB with no swap,
+against 2.1 GB of arrays, so the kernel paged them; the others had the memory
+to keep the files in its cache, and measure the answer rather than the disk.
+`tests/pass2_ooc` holds it: the binary run whole and with `--max-mem 1` on a
+raster with void, sea and enclosed unreached ground, every cell compared.
 
 `--barrier` exists for the same reason from the other direction. A one cell contour
 is a 93 m wall at 3 arcseconds and a 31 m wall at 1, so holding the search distance
@@ -302,9 +261,10 @@ and what it hides are separate questions.
 ## Memory, and large rasters
 
 Above `--max-mem` the first pass runs a band of rows at a time, each read with a
-margin of `radius`, and the second pass streams. A cell only ever looks `radius`
-away, so a banded result is identical to a whole-raster one rather than an
-approximation of it - checked at 0 differing cells of 51,854,401.
+margin of `radius`, and the second pass keeps what will not fit in files (see
+above). A cell only ever looks `radius` away, so a banded first pass is identical
+to a whole-raster one rather than an approximation of it - checked at 0 differing
+cells of 51,854,401 - and the second pass is the same solve either way.
 
 The bound matters more than it sounds. A summed area table over the constraint
 mask, which is what lets a cell with nothing within reach be skipped in constant
