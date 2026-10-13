@@ -62,10 +62,14 @@
 #include <cpl_string.h>
 
 #ifndef ISOFILL_NO_MAIN
-#include <errno.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 #endif
 
 #ifdef _OPENMP
@@ -517,7 +521,8 @@ static elev radius_value(const Band *b, const Rays *r, int radius,
  *
  * A file is created in the directory given, unlinked at once - it is never
  * seen, and goes when the process does however it goes - and sized with
- * ftruncate, so it reads as zeros: calloc's promise, kept.
+ * ftruncate, so it reads as zeros: calloc's promise, kept. On Windows it is
+ * opened delete-on-close and sized by the mapping, to the same effect.
  */
 static struct {
     int on;                 /* files allowed at all: the binary, out of core */
@@ -528,24 +533,71 @@ static struct {
     int na, cap;
 } big;
 
+#ifndef ISOFILL_NO_MAIN
+#ifdef _WIN32
+static void *map_file(const char *dir, size_t n)
+{
+    static unsigned serial;
+    char path[4096];
+    HANDLE f = INVALID_HANDLE_VALUE, m;
+    void *p;
+    int tries;
+    for (tries = 0; tries < 100 && f == INVALID_HANDLE_VALUE; tries++) {
+        if (snprintf(path, sizeof path, "%s/isofill-pass2-%lu-%u", dir,
+                     (unsigned long) GetCurrentProcessId(), serial++) >= (int) sizeof path)
+            return NULL;    /* cut short, it names some other directory */
+        f = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+        if (f == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) return NULL;
+    }
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    /* the mapping extends the file to n, in zeros; the view holds the file
+     * open, so the handles can go and the file with the view */
+    m = CreateFileMappingA(f, NULL, PAGE_READWRITE, (DWORD) ((unsigned long long) n >> 32),
+                           (DWORD) n, NULL);
+    p = m ? MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, n) : NULL;
+    if (m) CloseHandle(m);
+    CloseHandle(f);
+    return p;
+}
+
+static void unmap_file(void *p, size_t n)
+{
+    (void) n;
+    UnmapViewOfFile(p);
+}
+#else
+static void *map_file(const char *dir, size_t n)
+{
+    char path[4096];
+    void *p;
+    int fd;
+    if (snprintf(path, sizeof path, "%s/isofill-pass2-XXXXXX", dir) >= (int) sizeof path)
+        return NULL;        /* cut short, it names some other directory */
+    fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    unlink(path);
+    if (ftruncate(fd, (off_t) n) != 0) { close(fd); return NULL; }
+    p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    return p == MAP_FAILED ? NULL : p;
+}
+
+static void unmap_file(void *p, size_t n)
+{
+    munmap(p, n);
+}
+#endif
+#endif
+
 static void *big_alloc(size_t n, int zero)
 {
     void *p = NULL;
     int file = 0;
     if (big.on && (double) n > big.left) {
 #ifndef ISOFILL_NO_MAIN
-        char path[4096];
-        int fd;
-        if (snprintf(path, sizeof path, "%s/isofill-pass2-XXXXXX", big.dir ? big.dir : ".")
-                >= (int) sizeof path)
-            return NULL;    /* cut short, it names some other directory */
-        fd = mkstemp(path);
-        if (fd < 0) return NULL;
-        unlink(path);
-        if (ftruncate(fd, (off_t) n) != 0) { close(fd); return NULL; }
-        p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        close(fd);
-        if (p == MAP_FAILED) return NULL;
+        p = map_file(big.dir ? big.dir : ".", n);
+        if (!p) return NULL;
         file = 1;
         big.filed += (double) n;
 #endif
@@ -560,7 +612,7 @@ static void *big_alloc(size_t n, int zero)
             void *a = realloc(big.a, (size_t) cap * sizeof *big.a);
             if (!a) {
 #ifndef ISOFILL_NO_MAIN
-                if (file) munmap(p, n); else
+                if (file) unmap_file(p, n); else
 #endif
                 free(p);
                 return NULL;
@@ -580,7 +632,7 @@ static void big_free(void *p)
     for (i = 0; i < big.na; i++)
         if (big.a[i].p == p) {
 #ifndef ISOFILL_NO_MAIN
-            if (big.a[i].file) munmap(p, big.a[i].n);
+            if (big.a[i].file) unmap_file(p, big.a[i].n);
             else
 #endif
             { free(p); big.left += (double) big.a[i].n; }

@@ -11,7 +11,8 @@
  * ground the void must not take; and a coast with sea held at zero.
  *
  * Run from the repository root, with ./isofill built. It works in a directory
- * under tests/, or under $TMPDIR if that is set.
+ * under tests/, or under $TMPDIR if that is set - not on Windows, where the
+ * shell's TMPDIR may be one only MSYS2 can read.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,13 @@
 #include <dirent.h>
 #include <gdal.h>
 #include <cpl_conv.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <process.h>
+#define ISOFILL ".\\isofill.exe"   /* system() is cmd.exe's, which cannot run ./ */
+#else
+#define ISOFILL "./isofill"
+#endif
 
 #define COLS 900
 #define ROWS 700
@@ -88,6 +96,40 @@ static float *read_tif(const char *path)
     return v;
 }
 
+static char *make_dir(char *dir)
+{
+#ifdef _WIN32
+    int i;
+    for (i = 0; i < 100; i++) {
+        snprintf(dir, 1024, "tests/isofill-pass2-ooc-%d-%d", _getpid(), i);
+        if (_mkdir(dir) == 0) return dir;
+    }
+    return NULL;
+#else
+    const char *here = getenv("TMPDIR");
+    if (here && *here) snprintf(dir, 1024, "%s/isofill-pass2-ooc-XXXXXX", here);
+    else snprintf(dir, 1024, "tests/isofill-pass2-ooc-XXXXXX");
+    return mkdtemp(dir);
+#endif
+}
+
+/* everything in it, then it: the runs make nothing but files */
+static int clear_dir(const char *dir)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    char path[2048];
+    int bad = 0;
+    if (!d) return 1;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (remove(path)) bad = 1;
+    }
+    closedir(d);
+    return bad || rmdir(dir);
+}
+
 static int leftovers(const char *dir)
 {
     DIR *d = opendir(dir);
@@ -102,14 +144,12 @@ static int leftovers(const char *dir)
 
 int main(void)
 {
-    char dir[1024] = "tests/isofill-pass2-ooc-XXXXXX", cmd[4096], path[1024];
+    char dir[1024], cmd[4096], path[1024];
     float *whole, *ooc;
     int x, y, i, n_diff = 0, ooc_used_files;
-    const char *here = getenv("TMPDIR");
     FILE *f;
 
-    if (here && *here) snprintf(dir, sizeof dir, "%s/isofill-pass2-ooc-XXXXXX", here);
-    if (!mkdtemp(dir)) return fail("cannot make a working directory");
+    if (!make_dir(dir)) return fail("cannot make a working directory");
     GDALAllRegister();
 
     for (y = 0; y < ROWS; y++)
@@ -133,10 +173,10 @@ int main(void)
     snprintf(path, sizeof path, "%s/water.tif", dir);
     if (write_tif(path, GDT_Byte, water)) return fail("cannot write water.tif");
 
-    snprintf(cmd, sizeof cmd, "./isofill --radius 20 --threads 2 --mask %s/mask.tif --water %s/water.tif "
+    snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask %s/mask.tif --water %s/water.tif "
              "--max-mem 4096 %s/cons.tif %s/whole.tif 2>%s/whole.log", dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the whole run failed");
-    snprintf(cmd, sizeof cmd, "./isofill --radius 20 --threads 2 --mask %s/mask.tif --water %s/water.tif "
+    snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask %s/mask.tif --water %s/water.tif "
              "--max-mem 1 %s/cons.tif %s/ooc.tif 2>%s/ooc.log", dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the out-of-core run failed");
 
@@ -180,7 +220,8 @@ int main(void)
         return 1;
     }
     printf("pass 2 out of core: the same as solved whole, all %d cells to the bit\n", COLS * ROWS);
-    snprintf(cmd, sizeof cmd, "rm -r %s", dir);
-    if (system(cmd) != 0) return fail("cannot clear the working directory");
+    free(whole);
+    free(ooc);
+    if (clear_dir(dir)) return fail("cannot clear the working directory");
     return 0;
 }
