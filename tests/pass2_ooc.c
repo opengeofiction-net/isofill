@@ -11,8 +11,8 @@
  * ground the void must not take; and a coast with sea held at zero.
  *
  * Run from the repository root, with ./isofill built. It works in a directory
- * under tests/, or under $TMPDIR if that is set - not on Windows, where the
- * shell's TMPDIR may be one only MSYS2 can read.
+ * under tests/, or under $TMPDIR if that is set; on Windows always under
+ * tests/, as MSYS2's TMPDIR may name a directory only MSYS2 can read.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -173,11 +173,11 @@ int main(void)
     snprintf(path, sizeof path, "%s/water.tif", dir);
     if (write_tif(path, GDT_Byte, water)) return fail("cannot write water.tif");
 
-    snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask %s/mask.tif --water %s/water.tif "
-             "--max-mem 4096 %s/cons.tif %s/whole.tif 2>%s/whole.log", dir, dir, dir, dir, dir);
+    snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask \"%s/mask.tif\" --water \"%s/water.tif\" "
+             "--max-mem 4096 \"%s/cons.tif\" \"%s/whole.tif\" 2>\"%s/whole.log\"", dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the whole run failed");
-    snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask %s/mask.tif --water %s/water.tif "
-             "--max-mem 1 %s/cons.tif %s/ooc.tif 2>%s/ooc.log", dir, dir, dir, dir, dir);
+    snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask \"%s/mask.tif\" --water \"%s/water.tif\" "
+             "--max-mem 1 \"%s/cons.tif\" \"%s/ooc.tif\" 2>\"%s/ooc.log\"", dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the out-of-core run failed");
 
     /* that it really went out of core: the log says how much of the second

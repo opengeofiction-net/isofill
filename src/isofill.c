@@ -1900,8 +1900,13 @@ int main(int argc, char **argv)
                     big_free(whole);
                     if (!held)
                         fprintf(stderr, "  pass 2: %.0f bytes of its arrays were in files\n", big.filed);
+                    /* every array is freed by now; the record goes with them,
+                     * so nothing after can be taken for one in a file */
                     big.on = 0;
                     big.dir = NULL;
+                    free(big.a);
+                    big.a = NULL;
+                    big.na = big.cap = 0;
                     CPLFree(dir);
                     fprintf(stderr, "  pass 2 complete\n");
                 }
