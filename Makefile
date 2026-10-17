@@ -8,6 +8,16 @@ PREFIX  ?= /usr/local
 # package build - which would have shipped a single threaded binary quietly.
 OPENMP  ?= -fopenmp
 
+# One surface on every machine. A compiler may fuse a*b + c into one
+# instruction that rounds once rather than twice, and GCC and clang both do
+# wherever the target has one: arm64 always, x86-64 under -march=native. The
+# fill's decisions turn on its arithmetic to the last bit, and fused, Apple
+# Silicon's surface of the golden square differed from x86-64's in 4,829 of
+# 1,442,401 cells, by up to 29 m (danu #194). Baseline x86-64 has no fused
+# instruction, so there this changes nothing. := and not ?=, for the reason
+# OPENMP is kept out of CFLAGS: nothing the environment sets drops it.
+FPFLAGS := -ffp-contract=off
+
 GDAL_CFLAGS := $(shell gdal-config --cflags 2>/dev/null)
 GDAL_LIBS   := $(shell gdal-config --libs 2>/dev/null)
 
@@ -27,10 +37,10 @@ LIB := libisofill.$(SOEXT)
 all: isofill $(LIB)
 
 isofill: src/isofill.c src/isofill.h
-	$(CC) $(CFLAGS) $(OPENMP) $(GDAL_CFLAGS) -o $@ src/isofill.c $(GDAL_LIBS) $(LDFLAGS) $(OPENMP) -lm
+	$(CC) $(CFLAGS) $(FPFLAGS) $(OPENMP) $(GDAL_CFLAGS) -o $@ src/isofill.c $(GDAL_LIBS) $(LDFLAGS) $(OPENMP) -lm
 
 $(LIB): src/isofill.c src/isofill.h
-	$(CC) $(CFLAGS) $(OPENMP) -fPIC -shared -DISOFILL_NO_MAIN $(GDAL_CFLAGS) -o $@ src/isofill.c $(GDAL_LIBS) $(LDFLAGS) $(OPENMP) -lm
+	$(CC) $(CFLAGS) $(FPFLAGS) $(OPENMP) -fPIC -shared -DISOFILL_NO_MAIN $(GDAL_CFLAGS) -o $@ src/isofill.c $(GDAL_LIBS) $(LDFLAGS) $(OPENMP) -lm
 
 # A program that links the library and fills a small raster, asserting the
 # surface it gets is the one a caller is entitled to: constraints untouched,
@@ -46,21 +56,21 @@ $(LIB): src/isofill.c src/isofill.h
 # It includes src/isofill.c to reach the static functions, so it is built from
 # the source rather than linked to the library.
 tests/pass1_ref: tests/pass1_ref.c src/isofill.c src/isofill.h
-	$(CC) $(CFLAGS) $(OPENMP) $(GDAL_CFLAGS) -o $@ tests/pass1_ref.c $(GDAL_LIBS) $(LDFLAGS) $(OPENMP) -lm
+	$(CC) $(CFLAGS) $(FPFLAGS) $(OPENMP) $(GDAL_CFLAGS) -o $@ tests/pass1_ref.c $(GDAL_LIBS) $(LDFLAGS) $(OPENMP) -lm
 
 # The second pass against what Laplace's equation must give: zero between a
 # coast and the drawn edge, a flat floor in a ring, and random ground against a
 # solve in double precision.
 tests/pass2_solved: tests/pass2_solved.c $(LIB) src/isofill.h
-	$(CC) $(CFLAGS) $(OPENMP) -Isrc -o $@ tests/pass2_solved.c -L. -lisofill $(LDFLAGS) $(OPENMP) -lm
+	$(CC) $(CFLAGS) $(FPFLAGS) $(OPENMP) -Isrc -o $@ tests/pass2_solved.c -L. -lisofill $(LDFLAGS) $(OPENMP) -lm
 
 # The second pass out of core against the same raster solved whole, to the
 # bit: the binary run twice, the second time with no memory to speak of.
 tests/pass2_ooc: tests/pass2_ooc.c
-	$(CC) $(CFLAGS) $(GDAL_CFLAGS) -o $@ tests/pass2_ooc.c $(GDAL_LIBS) $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) $(FPFLAGS) $(GDAL_CFLAGS) -o $@ tests/pass2_ooc.c $(GDAL_LIBS) $(LDFLAGS) -lm
 
 tests/run_lib: tests/run_lib.c $(LIB) src/isofill.h
-	$(CC) $(CFLAGS) $(OPENMP) -Isrc -o $@ tests/run_lib.c -L. -lisofill $(LDFLAGS) $(OPENMP)
+	$(CC) $(CFLAGS) $(FPFLAGS) $(OPENMP) -Isrc -o $@ tests/run_lib.c -L. -lisofill $(LDFLAGS) $(OPENMP)
 
 install: isofill $(LIB)
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include
