@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.12.0"
+#define ISOFILL_VERSION "0.13.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -28,6 +28,12 @@ typedef struct {
                         * and no longer does: the fill sets the count on every
                         * call. A host that has chosen its own count and wants
                         * it kept should pass that number, not a zero. */
+    int edge_void;     /* 1: the raster's edge seeds the void, as ground nobody
+                        * drew; 0: --no-edge-void, only outside the mask does.
+                        * A raster that is a piece of a larger drawn area - an
+                        * editor's working set inside its zone - has ground
+                        * beyond its edge, and says where it has none by
+                        * leaving those edge cells out of the mask */
 } isofill_params;
 
 /* A version string, so a caller can refuse a library that is not the one it

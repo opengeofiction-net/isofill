@@ -1,3 +1,19 @@
+isofill (0.13.0) unstable; urgency=medium
+
+  * --no-edge-void, edge_void in isofill_params: the raster's edge is not
+    the end of the drawn ground. The void flood no longer starts from it,
+    and the solve mirrors it rather than counting the cell beyond as zero,
+    so unreached ground at the edge runs on level from the contours. For a
+    raster that is a piece of a larger area - Danu's working set inside its
+    zone, where a valley floor running to the set's edge was held at zero
+    and turned to sea. Where nothing is drawn beyond a stretch of the edge,
+    the caller leaves those edge cells out of --mask.
+  * The default is unchanged, to the bit; make check's references agree.
+  * tests/run_lib: the edge held at zero by default, solved level with
+    edge_void 0, and held again where an edge is left out of the mask.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Wed, 11 Nov 2026 22:52:07 +0000
+
 isofill (0.12.0) unstable; urgency=medium
 
   * The second pass out of core is the second pass. Above --max-mem it was
