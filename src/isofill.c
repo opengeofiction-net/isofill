@@ -756,8 +756,11 @@ static int is_unset(elev v)
  */
 static inline float edge_diag(int x, int y, int cols, int rows, int mir)
 {
+    int n;
     if (!mir) return 4.0f;
-    return (float) ((y > 0) + (y < rows - 1) + (x > 0) + (x < cols - 1));
+    n = (y > 0) + (y < rows - 1) + (x > 0) + (x < cols - 1);
+    /* a raster of one cell: nothing to relax towards, and no zero to divide by */
+    return (float) (n ? n : 1);
 }
 
 static void gs_half(float *z, const unsigned char *fx, int cols, int rows,
@@ -778,7 +781,7 @@ static void gs_half(float *z, const unsigned char *fx, int cols, int rows,
             s += (y < rows - 1) ? z[k + (size_t) cols] : 0.0f;
             s += (x > 0)        ? z[k - 1]             : 0.0f;
             s += (x < cols - 1) ? z[k + 1]             : 0.0f;
-            z[k] = mir ? s / edge_diag(x, y, cols, rows, 1) : s * relax_w;
+            z[k] = mir ? s * (relax_w * 4.0f / edge_diag(x, y, cols, rows, 1)) : s * relax_w;
         }
     }
 }
