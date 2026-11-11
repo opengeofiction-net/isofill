@@ -102,6 +102,7 @@ one it was built against, and `isofill --version` prints the same string.
 | `--no-pass2` | leave the cells the first pass declined unset |
 | `--pass2-margin N` | accepted and ignored: the overlap of the bands the second pass used to be solved in out of core |
 | `--water FILE` | a raster the size of the constraints: where it is not zero the cell is water, held at zero by `--pass2 diffuse` |
+| `--no-edge-void` | the raster's edge is not the end of the drawn ground: unreached ground there is solved, the edge mirrored, not held at zero. For a raster that is a piece of a larger area; see *The edge* below |
 | `--max-mem MB` | above this, the first pass works band by band and the second keeps what will not fit in files beside the output - the same answer either way. Default 4096; see below |
 | `--threads N` | default: all but two |
 | `--explain X Y` | say what one cell could see and what it did with it |
@@ -208,6 +209,29 @@ contour to zero across sixty cells - a gradient of a fifth, which hillshades as
 a dark blob unrelated to the terrain, and is worse than the artefact it fixes.
 What separates the two is where the region reaches, not what the first pass
 said about it. See `mark_void`.
+
+### The edge
+
+The flood starts from two places: outside `--mask`, and the raster's edge. And
+the solve counts a cell beyond the edge as zero. Both are right for a whole
+zone, whose edge is the end of what anyone drew, and both are wrong for a piece
+of one. Danu builds an editor's working set - three degree squares by three,
+inside a zone that goes on past it - and a valley floor the contours do not
+reach, running to the set's edge, was held at zero and turned to sea there,
+though the square beyond it describes the ground (roantra's N45E027 from
+N45E028's set, 2026-11-11).
+
+`--no-edge-void`, `edge_void = 0` in the library, says the edge is not the end.
+The edge seeds no void, and the solve mirrors it: a cell on the edge relaxes to
+the mean of the neighbours it has, so ground runs on past the edge level rather
+than down to zero. Where nothing is drawn beyond a stretch of the edge, the
+caller leaves those edge cells out of `--mask`, and the flood starts there as
+it would have. The default, and everything a whole zone does, is unchanged to
+the bit.
+
+A mirrored solve needs the cycles to carry it across the raster: on a strip a
+few dozen cells high the coarsest level is too thin to, and the far end comes
+out low. A working set is square, and thousands of cells across.
 
 Decaying everything towards zero instead - solving (laplacian - lambda) z - was
 tried and abandoned. It cannot tell no data from gentle ground between two

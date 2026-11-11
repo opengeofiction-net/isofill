@@ -197,6 +197,52 @@ int main(void)
     }
 
     /*
+     * edge_void: the raster's edge as the end of the drawn ground, or not.
+     * Two contours on the left of a square raster; the rest is out of reach of
+     * both. By default it floods from the edge and is held at zero. A raster
+     * that is a piece of a larger drawn area - an editor's working set inside
+     * its zone - says its edge is not the end (0): that ground is solved, the
+     * edge mirrored rather than zero, so it runs on level from the contours.
+     * Where there is nothing drawn beyond, the caller leaves those edge cells
+     * out of the mask, and the flood starts there instead. Square, and wide
+     * enough for the cycles: a strip a few dozen cells high coarsens to a
+     * level too thin to carry a mirrored solve across it.
+     */
+    {
+#define EW 256
+        static float ec[EW * EW], held[EW * EW], solved[EW * EW], marked[EW * EW];
+        static unsigned char all[EW * EW], ends[EW * EW];
+        int yy, xx;
+        size_t mid = (size_t) (EW / 2) * EW;
+        for (yy = 0; yy < EW; yy++)
+            for (xx = 0; xx < EW; xx++) {
+                size_t k = (size_t) yy * EW + xx;
+                ec[k] = xx == 4 ? 100.0f : xx == 10 ? 200.0f : NO_ELEV;
+                all[k] = 1;
+                ends[k] = xx == EW - 1 ? 0 : 1;      /* nothing drawn east of the raster */
+            }
+        isofill_params_default(&p);
+        if (p.edge_void != 1) return fail("isofill_params_default() does not seed the void at the edge");
+        p.threads = 1;
+        if (isofill_run(ec, 0, 0.0, all, NULL, EW, EW, &p, held) < 0)
+            return fail("edge_void 1 would not fill");
+        if (held[mid + EW - 4] != 0.0f)
+            return fail("edge_void 1: the far ground is not held at zero");
+        p.edge_void = 0;
+        if (isofill_run(ec, 0, 0.0, all, NULL, EW, EW, &p, solved) < 0)
+            return fail("edge_void 0 would not fill");
+        if (solved[mid + EW - 1] < 199.0f || solved[mid + EW - 1] > 200.5f)
+            return fail("edge_void 0: the far ground does not run on level from the contours");
+        if (isofill_run(ec, 0, 0.0, ends, NULL, EW, EW, &p, marked) < 0)
+            return fail("edge_void 0 with an edge masked would not fill");
+        if (marked[mid + EW - 4] != 0.0f)
+            return fail("edge_void 0: an edge left out of the mask does not seed the void");
+        /* reached ground is the first pass's either way */
+        if (held[mid + 7] != solved[mid + 7] || held[mid + 7] != marked[mid + 7])
+            return fail("edge_void changed ground the contours reach");
+    }
+
+    /*
      * What a `threads` of zero means. It used to mean "leave the runtime
      * alone", which is every core - so the binary left two free and every
      * library caller took the lot, on a machine somebody might be drawing on.
