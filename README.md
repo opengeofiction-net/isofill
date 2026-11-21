@@ -393,9 +393,12 @@ propose corrections, and the line search judges each against the finest
 level's equation, wall and all. A wall cell then takes the highest of its
 neighbours, the cliff's top, which is where OSM draws one.
 
-A wall cell no constraint reaches is passable to the void's flood, which
-crosses a cliff in ground nobody described, and is never itself held at zero
-- or a cliff touching the void would be flooded end to end into a trench at
-sea level. One that is a constraint, a cliff's top burned with a height, is
+A wall stops the void's flood, which goes round a cliff in ground nobody
+described rather than along it, and a cell beside a wall that sees nothing
+past it or along it - inside the widening, its rays all stopped - with
+constraints in its radius is declined, not out of reach (0.16.1). On 0.16.0 a
+wall was passable, and the flood ran along a cliff from the raster's edge and
+took those cells: a trench at sea level a cell beside every cliff that
+touched the void. One that is a constraint, a cliff's top burned with a height, is
 ground like any other. Without a wall nothing changes, to the bit.
 

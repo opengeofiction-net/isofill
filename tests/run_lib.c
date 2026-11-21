@@ -431,6 +431,12 @@ int main(void)
          * cliff would be dug into a trench at zero */
         if (walled[mid + 100] < 150.0f)
             return fail("a wall touching the raster's edge was flooded as void");
+        /* nor the cells beside it, inside the widening, which see nothing
+         * past it or along it: declined, not out of reach, or the flood
+         * takes them and digs the trench a cell over (0.16.0) */
+        for (xx = 97; xx <= 103; xx++)
+            if (walled[mid + xx] < 90.0f)
+                return fail("the ground beside a wall touching the raster's edge was flooded as void");
         memcpy(split, first, sizeof split);
         if (isofill_diffuse_wall(split, all, NULL, wl, EW, EW) != 0)
             return fail("isofill_diffuse_wall returned an error");

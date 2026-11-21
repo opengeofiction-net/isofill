@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.16.0"
+#define ISOFILL_VERSION "0.16.1"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -141,9 +141,12 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
  *                 out of their mean. So the ground either side of a cliff is
  *                 filled from its own side. A wall cell takes the highest of
  *                 its neighbours once they are solved - the cliff's top, where
- *                 OSM draws one. A wall cell the first pass reaches nothing
- *                 from stays out of reach, so the void floods across it; one
- *                 that is a constraint is a constraint.
+ *                 OSM draws one. A wall stops the void's flood, which goes
+ *                 round a cliff in ground nobody described rather than along
+ *                 it; a cell beside a wall that sees nothing past it, with
+ *                 constraints in its radius, is declined rather than out of
+ *                 reach (0.16.1). A wall cell that is a constraint is a
+ *                 constraint.
  */
 typedef struct {
     const unsigned char *mask;

@@ -1431,12 +1431,11 @@ static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
         if (wallp)  { big_free(*wallp);  *wallp  = NULL; }
         return -2;
     }
-    /* a wall the first pass did not answer is passable to the void's flood,
-     * which crosses a cliff in ground nobody described - and is never itself
-     * held at zero, below: a cliff touching the void would otherwise be
-     * flooded end to end and dug into a trench at sea level */
+    /* a wall stops the void's flood (0.16.1): passable, it carried the void
+     * along a cliff from the raster's edge into ground the contours describe.
+     * A cliff in ground nobody described is a line the flood goes round */
     for (k = 0; k < cells; k++)
-        oor[k] = (v[k] == OUT_OF_REACH) || (wall && wall[k] && is_unset(v[k]));
+        oor[k] = (v[k] == OUT_OF_REACH) && !(wall && wall[k]);
     if (mark_void(oor, mask, cols, rows, edge_void, &vd) != 0) {
         big_free(oor); big_free(fx);
         if (waterp) { big_free(*waterp); *waterp = NULL; }
@@ -1598,6 +1597,7 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
 {
     long long filled = 0;
     int y;
+    unsigned char *near = NULL;
     Band b;
     b.cols = cols; b.rows = bh;
     b.v = v;
@@ -1618,6 +1618,29 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
     }
     build_sat(&b);
     dilate(&b, barrier, wall);
+    /* the cells a wall's widening covers, and one more: where a cell's rays
+     * can all be stopped by the wall beside it */
+    if (wall) {
+        size_t i, m = (size_t) cols * bh;
+        int k2, xx2, yy2, reach = barrier + 1;
+        unsigned char *t;
+        near = malloc(m);
+        t = malloc(m);
+        if (!near || !t) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+        for (i = 0; i < m; i++) near[i] = wall[i] != 0;
+        for (k2 = 0; k2 < reach; k2++) {
+            memcpy(t, near, m);
+            for (yy2 = 0; yy2 < bh; yy2++)
+                for (xx2 = 0; xx2 < cols; xx2++) {
+                    size_t j = (size_t) yy2 * cols + xx2;
+                    if (t[j]) continue;
+                    if ((xx2 > 0 && t[j - 1]) || (xx2 + 1 < cols && t[j + 1])
+                        || (yy2 > 0 && t[j - cols]) || (yy2 + 1 < bh && t[j + cols]))
+                        near[j] = 1;
+                }
+        }
+        free(t);
+    }
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 16) reduction(+:filled)
 #endif
@@ -1638,17 +1661,28 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
                 continue;
             }
             val = radius_value(&b, rays, radius, grad_min, barrier, xx, y + margin);
-            /* a wall is never answered across: declined, so the second pass
-             * leaves it out - unless nothing reaches it, which the void flood
-             * has to be able to cross, or it is a constraint itself */
-            if (wall && wall[(size_t) (y + margin) * cols + xx] && val != OUT_OF_REACH
-                && !have(&b, xx, y + margin))
-                val = NO_ELEV;
+            if (wall) {
+                size_t bk = (size_t) (y + margin) * cols + xx;
+                /* a wall is never answered across: declined, so the second
+                 * pass leaves it out - unless it is a constraint itself */
+                if (wall[bk] && !have(&b, xx, y + margin))
+                    val = NO_ELEV;
+                /* and a cell beside one, inside the widening, sees nothing
+                 * past the wall or along it - out of reach by its rays, with
+                 * constraints in its radius. Declined, as it would be beside a
+                 * contour: solved from its side. Out of reach, the void's
+                 * flood took it and dug a trench at zero down the cliff
+                 * (0.16.0) */
+                else if (val == OUT_OF_REACH && near[bk]
+                         && sat_count(&b, xx - radius, y + margin - radius,
+                                      xx + radius, y + margin + radius) > 0)
+                    val = NO_ELEV;
+            }
             out[k] = val;
             if (val != NO_ELEV && val != OUT_OF_REACH && val != ONE_LEVEL) filled++;
         }
     }
-    free(b.run); free(b.blk); free(b.sat);
+    free(b.run); free(b.blk); free(b.sat); free(near);
     return filled;
 }
 
