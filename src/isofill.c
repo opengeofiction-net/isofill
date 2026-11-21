@@ -1611,13 +1611,22 @@ int isofill_diffuse(float *surface, const unsigned char *mask,
 
 /* ------------------------------------------------------------------ main */
 
-/* a held raster's own nodata means not held, as NO_ELEV and NaN do */
-static void held_unset(float *h, size_t n, int has_nd, double nd)
+/*
+ * A held raster's own nodata means not held, as NO_ELEV and NaN do. Compared
+ * as floats, deliberately: the band is read as Float32, so a nodata cell holds
+ * (float) nd, and comparing it in double against an nd that float cannot
+ * represent exactly would miss every one of them. GDAL matches nodata on a
+ * Float32 band the same way. Returns how many cells are held.
+ */
+static long long held_unset(float *h, size_t n, int has_nd, double nd)
 {
+    long long held = 0;
     size_t k;
-    if (!has_nd) return;
-    for (k = 0; k < n; k++)
-        if (h[k] == (float) nd) h[k] = (float) NO_ELEV;
+    for (k = 0; k < n; k++) {
+        if (has_nd && h[k] == (float) nd) h[k] = (float) NO_ELEV;
+        else if (is_held(h[k])) held++;
+    }
+    return held;
 }
 
 static void usage(void)
@@ -1876,7 +1885,8 @@ int main(int argc, char **argv)
                 hbuf = malloc(n * sizeof *hbuf);
                 if (!hbuf) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                 IO_(GDALRasterIO(hb, GF_Read, 0, 0, cols, rows, hbuf, cols, rows, GDT_Float32, 0, 0));
-                held_unset(hbuf, n, held_has_nd, held_nd);
+                fprintf(stderr, "  %lld cells held for pass 2\n",
+                        held_unset(hbuf, n, held_has_nd, held_nd));
             }
             p.radius = radius; p.barrier = barrier; p.grad_min = grad_min;
             p.pass2 = do_pass2;
@@ -2002,6 +2012,7 @@ int main(int argc, char **argv)
                         /* a block of rows at a time, into the surface the
                          * first pass left: what the library does in one go */
                         int blk = 256, y;
+                        long long put = 0;
                         float *hrow = malloc((size_t) cols * blk * sizeof *hrow);
                         if (!hrow) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                         for (y = 0; y < rows; y += blk) {
@@ -2010,9 +2021,10 @@ int main(int argc, char **argv)
                             IO_(GDALRasterIO(hb, GF_Read, 0, y, cols, hh, hrow, cols, hh,
                                              GDT_Float32, 0, 0));
                             held_unset(hrow, m, held_has_nd, held_nd);
-                            apply_held(whole + (size_t) y * cols, hrow, m);
+                            put += apply_held(whole + (size_t) y * cols, hrow, m);
                         }
                         free(hrow);
+                        fprintf(stderr, "  %lld cells held for pass 2\n", put);
                     }
                     if (wb) {
                         wm = big_alloc((size_t) cols * rows, 0);

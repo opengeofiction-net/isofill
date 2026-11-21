@@ -114,6 +114,10 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
  * caller's to leave those cells out of the constraints; this does not touch
  * them. pass1_out is the first pass as it was, without the held values.
  *
+ * There is no nodata argument for held: a caller whose held raster has its
+ * own nodata value writes ISOFILL_NO_ELEV or NaN in those cells first, as the
+ * binary does for --held.
+ *
  * isofill_run_ex is this with NULL. The binary's --held is this.
  */
 long long isofill_run_held(const float *constraints, int has_nodata, double nodata,
