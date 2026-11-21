@@ -367,6 +367,13 @@ int main(void)
                 return fail("isofill_hold then isofill_diffuse is not isofill_run_held");
         if (isofill_hold(NULL, rv, EW, EW, p.radius) != -1)
             return fail("isofill_hold accepted a null surface");
+        /* a radius past the raster reaches all of it, and does not overflow */
+        memcpy(none, none1, sizeof none);
+        if (isofill_hold(none, rv, EW, EW, 2147483647) != 0)
+            return fail("isofill_hold refused a radius past the raster");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (none[i] == -32767.0f)
+                return fail("a radius past the raster left a cell out of reach");
     }
 
     /*

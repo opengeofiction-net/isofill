@@ -1399,9 +1399,11 @@ static long long apply_held(elev *v, const float *held, size_t n)
  * So a cell out of reach of every constraint but within the radius of a held
  * cell is declined instead: solved, between the river and whatever else
  * bounds it, and not void. Within the square of side 2 radius + 1, not the
- * circle - two sliding counts, one along the rows and one down the columns,
- * where the circle would cost a pass a radius - which is the box the first
- * pass's own reach test starts from. The first pass itself is as it was.
+ * circle the first pass finally judges reach by: two sliding counts, one along
+ * the rows and one down the columns, where the circle would cost a pass a
+ * radius. So the held reach goes a little further, at the square's corners,
+ * than a constraint's would - the square is only the box test the first pass
+ * makes before its exact one. The first pass itself is as it was.
  *
  * held_rows marks, for each cell of nrows rows, whether a held cell lies
  * within radius along its own row; held_reach takes those marks down the
@@ -1411,6 +1413,9 @@ static long long apply_held(elev *v, const float *held, size_t n)
 static void held_rows(const float *h, int cols, int nrows, int r, unsigned char *out)
 {
     int y;
+    /* a radius past the raster reaches the whole row, and x + r + 1 below
+     * must not overflow for one a caller passes near INT_MAX */
+    if (r > cols) r = cols;
     for (y = 0; y < nrows; y++) {
         const float *row = h + (size_t) y * cols;
         unsigned char *o = out + (size_t) y * cols;
@@ -1430,6 +1435,7 @@ static long long held_reach(elev *v, const unsigned char *rowd, int cols, int ro
     int y, x;
     int *n = calloc((size_t) cols, sizeof *n);
     if (!n) return -1;
+    if (r > rows) r = rows;                  /* as held_rows: no overflow at y + r + 1 */
     for (y = 0; y <= r && y < rows; y++)
         for (x = 0; x < cols; x++) n[x] += rowd[(size_t) y * cols + x];
     for (y = 0; y < rows; y++) {
@@ -2092,7 +2098,10 @@ int main(int argc, char **argv)
                         long long put = 0, reached;
                         float *hrow = malloc((size_t) cols * blk * sizeof *hrow);
                         /* each row's marks, a byte a cell, for the pass down
-                         * the columns: in a file where it will not fit */
+                         * the columns: in a file where it will not fit, and
+                         * freed before the second pass makes its arrays, so
+                         * the peak here - the surface and the marks, five
+                         * bytes a cell - is under the solve's own */
                         unsigned char *rowd = big_alloc((size_t) cols * rows, 0);
                         if (!hrow || !rowd) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                         for (y = 0; y < rows; y += blk) {

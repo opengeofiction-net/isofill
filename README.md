@@ -238,9 +238,10 @@ it is all that says how low the ground goes left that ground at sea level with
 the river standing in it - 31,727 cells of castellan's land, in a valley at
 290 m, on 0.14.0. So a cell out of reach of every constraint but within the
 radius of a held cell is declined instead, and solved. Within the square of
-side 2 radius + 1 rather than the circle: two sliding counts, along the rows
-and down the columns, which is the box the first pass's own reach test starts
-from. The first pass is as it was.
+side 2 radius + 1 rather than the circle the first pass judges reach by: two
+sliding counts, along the rows and down the columns. So a held cell reaches a
+little further, at the corners, than a constraint does. The first pass is as
+it was.
 
 In core the held raster is read whole, four bytes a cell, and its reach marked,
 one more, and both are counted towards `--max-mem`; out of core it goes into the second pass's surface a block of rows
