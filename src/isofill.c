@@ -1615,15 +1615,8 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
     if (p->pass2) {
         unsigned char *wbuf = NULL, *mbuf = NULL;
         /* after pass1_out is taken: that is the first pass, which never saw these */
-        if (held) {
-            /* in reach of a held cell is not out of reach; then the values */
-            unsigned char *rowd = malloc(n);
-            if (!rowd) return -2;
-            held_rows(held, cols, rows, p->radius, rowd);
-            if (held_reach(out, rowd, cols, rows, p->radius) < 0) { free(rowd); return -2; }
-            free(rowd);
-            apply_held(out, held, n);
-        }
+        if (held && isofill_hold(out, held, cols, rows, p->radius) != 0)
+            return -2;
         if (water) {
             wbuf = malloc(n);
             if (!wbuf) return -2;
@@ -1641,6 +1634,23 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
             for (k = 0; k < n; k++) if (!mask[k]) out[k] = 0;
     }
     return filled;
+}
+
+int isofill_hold(float *surface, const float *held, int cols, int rows, int radius)
+{
+    size_t n;
+    unsigned char *rowd;
+    if (!surface || !held || cols <= 0 || rows <= 0 || radius < 0)
+        return -1;
+    n = (size_t) cols * rows;
+    /* in reach of a held cell is not out of reach; then the values */
+    rowd = malloc(n);
+    if (!rowd) return -2;
+    held_rows(held, cols, rows, radius, rowd);
+    if (held_reach(surface, rowd, cols, rows, radius) < 0) { free(rowd); return -2; }
+    free(rowd);
+    apply_held(surface, held, n);
+    return 0;
 }
 
 int isofill_diffuse(float *surface, const unsigned char *mask,

@@ -355,6 +355,18 @@ int main(void)
                 return fail("the river's reach changed the first pass");
         if (got[mid + 7] != none[mid + 7])
             return fail("the river's reach changed ground the contours reach");
+        /* and the two passes apart - the first, isofill_hold, isofill_diffuse
+         * - are isofill_run_held, cell for cell */
+        memcpy(none, none1, sizeof none);
+        if (isofill_hold(none, rv, EW, EW, p.radius) != 0)
+            return fail("isofill_hold returned an error");
+        if (isofill_diffuse(none, all, NULL, EW, EW) != 0)
+            return fail("isofill_diffuse after isofill_hold returned an error");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (memcmp(&none[i], &got[i], sizeof *got))
+                return fail("isofill_hold then isofill_diffuse is not isofill_run_held");
+        if (isofill_hold(NULL, rv, EW, EW, p.radius) != -1)
+            return fail("isofill_hold accepted a null surface");
     }
 
     /*

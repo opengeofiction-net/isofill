@@ -128,6 +128,20 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
                            const isofill_params *params, float *out, float *pass1_out);
 
 /*
+ * The held cells written into a surface the first pass left, as
+ * isofill_run_held does between its passes: each cell within radius of a held
+ * cell (the square of side 2 radius + 1) that the first pass called out of
+ * reach becomes declined, and each held cell takes its value. held is
+ * cols*rows floats, a cell held unless it is ISOFILL_NO_ELEV or NaN; surface
+ * is written in place. isofill_diffuse after it is the rest of
+ * isofill_run_held, cell for cell - for a caller that runs the two passes
+ * apart, as an editor solving a box does.
+ *
+ * Returns 0, or -1 for bad arguments and -2 for out of memory.
+ */
+int isofill_hold(float *surface, const float *held, int cols, int rows, int radius);
+
+/*
  * The second pass on its own, over a surface the first pass has already
  * written. surface is cols*rows floats holding what pass 1 left - sentinels
  * for the cells it declined - and is solved in place. mask and water are

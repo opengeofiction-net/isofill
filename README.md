@@ -77,7 +77,9 @@ last whole-raster answer, and get the second pass for the box alone. That is an
 approximation - diffusion is global - and how good one is depends on how far a
 change travels in the data at hand. `isofill_run_held()` is `isofill_run_ex()`
 with cells held at the caller's values by the second pass, which is `--held`;
-see *Held cells* below.
+see *Held cells* below. `isofill_hold()` is what it does between its passes,
+for a caller that runs them apart: `isofill_run_ex()` with pass 2 off, then
+`isofill_hold()`, then `isofill_diffuse()` is `isofill_run_held()` to the bit.
 
 `isofill_params_default()` hands out the command line's defaults, and that
 includes the threads: a `threads` of zero or less means all but two, the same

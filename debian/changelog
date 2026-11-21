@@ -7,6 +7,9 @@ isofill (0.15.0) unstable; urgency=medium
     the lowest contour left that ground at sea level with the river
     standing in it - 31,727 cells of castellan's land, at 290 m before.
   * Nothing changes without --held, to the bit; the first pass is as it was.
+  * isofill_hold() in the library: the held cells and their reach written
+    into a first pass, as isofill_run_held does between its passes - for a
+    caller that runs the two apart, such as Danu's editor solving a box.
   * tests/run_lib: a river held in unreached ground keeps the ground beside
     it and within its radius, and what is beyond its reach is still void.
     tests/pass2_ooc requires the river to reach unreached ground, so the
