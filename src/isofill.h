@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.15.0"
+#define ISOFILL_VERSION "0.16.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -128,6 +128,38 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
                            const isofill_params *params, float *out, float *pass1_out);
 
 /*
+ * The fill's inputs beside the constraints, any of them NULL: what
+ * isofill_run_layers takes, so that the next input is a field here rather
+ * than another function.
+ *
+ *   mask, water   cols*rows bytes, as for isofill_run
+ *   held          cols*rows floats, as for isofill_run_held
+ *   wall          cols*rows bytes: where non-zero, a wall (--wall, 0.16.0) -
+ *                 a cliff. The first pass does not see past it, as it does
+ *                 not see past a constraint, and never answers it; the second
+ *                 does not diffuse across it, a wall's neighbours leaving it
+ *                 out of their mean. So the ground either side of a cliff is
+ *                 filled from its own side. A wall cell takes the highest of
+ *                 its neighbours once they are solved - the cliff's top, where
+ *                 OSM draws one. A wall cell the first pass reaches nothing
+ *                 from stays out of reach, so the void floods across it; one
+ *                 that is a constraint is a constraint.
+ */
+typedef struct {
+    const unsigned char *mask;
+    const unsigned char *water;
+    const float *held;
+    const unsigned char *wall;
+} isofill_layers;
+
+/*
+ * The fill with all of its inputs. isofill_run_held is this with no wall.
+ */
+long long isofill_run_layers(const float *constraints, int has_nodata, double nodata,
+                             const isofill_layers *layers, int cols, int rows,
+                             const isofill_params *params, float *out, float *pass1_out);
+
+/*
  * The held cells written into a surface the first pass left, as
  * isofill_run_held does between its passes: each cell within radius of a held
  * cell (the square of side 2 radius + 1) that the first pass called out of
@@ -168,5 +200,13 @@ int isofill_hold(float *surface, const float *held, int cols, int rows, int radi
  */
 int isofill_diffuse(float *surface, const unsigned char *mask,
                     const unsigned char *water, int cols, int rows);
+
+/*
+ * isofill_diffuse with walls (0.16.0): the second pass not diffusing across
+ * them, as isofill_run_layers's does. isofill_diffuse is this with NULL.
+ */
+int isofill_diffuse_wall(float *surface, const unsigned char *mask,
+                         const unsigned char *water, const unsigned char *wall,
+                         int cols, int rows);
 
 #endif

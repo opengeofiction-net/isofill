@@ -377,6 +377,69 @@ int main(void)
     }
 
     /*
+     * A wall (0.16.0): a cliff. A 200 m contour down column 60 and a 100 m
+     * one down column 140, in sight of each other at radius 60; without a
+     * wall the ground between ramps from one to the other. A wall down column
+     * 100 and each side sees only its own: the first pass declines both, and
+     * the second, not diffusing across the wall, fills each side level from
+     * its contour - 200 m to the west of it, 100 m to the east, and the wall
+     * itself at the top, 200.
+     */
+    {
+        static float wc[EW * EW], open[EW * EW], walled[EW * EW], first[EW * EW], split[EW * EW];
+        static unsigned char all[EW * EW], wl[EW * EW];
+        isofill_layers L;
+        int yy, xx;
+        size_t i, mid = (size_t) (EW / 2) * EW;
+        for (yy = 0; yy < EW; yy++)
+            for (xx = 0; xx < EW; xx++) {
+                size_t k = (size_t) yy * EW + xx;
+                wc[k] = xx == 60 ? 200.0f : xx == 140 ? 100.0f : NO_ELEV;
+                all[k] = 1;
+                wl[k] = xx == 100;
+            }
+        isofill_params_default(&p);
+        p.threads = 1;
+        p.radius = 60;
+        p.edge_void = 0;
+        memset(&L, 0, sizeof L);
+        L.mask = all;
+        if (isofill_run_layers(wc, 0, 0.0, &L, EW, EW, &p, open, NULL) < 0)
+            return fail("the wall fixture would not fill without its wall");
+        if (open[mid + 90] < 110.0f || open[mid + 90] > 190.0f)
+            return fail("without the wall the ground does not ramp between the contours, so this tests nothing");
+        L.wall = wl;
+        if (isofill_run_layers(wc, 0, 0.0, &L, EW, EW, &p, walled, first) < 0)
+            return fail("the wall fixture would not fill with its wall");
+        if (walled[mid + 90] < 199.5f || walled[mid + 90] > 200.5f)
+            return fail("the ground west of the wall is not level with its own contour");
+        if (walled[mid + 110] < 99.5f || walled[mid + 110] > 100.5f)
+            return fail("the ground east of the wall is not level with its own contour");
+        if (walled[mid + 100] < 199.5f)
+            return fail("the wall is not at the top of its drop");
+        if (first[mid + 100] > -32000.0f)
+            return fail("the first pass answered a wall");
+        /* and the two passes apart - the first, then isofill_diffuse_wall -
+         * are isofill_run_layers, cell for cell: with the edge seeding the
+         * void and solved at zero beyond it, which is isofill_diffuse's, as a
+         * box is solved */
+        p.edge_void = 1;
+        if (isofill_run_layers(wc, 0, 0.0, &L, EW, EW, &p, walled, first) < 0)
+            return fail("the wall fixture would not fill with the edge as the end");
+        /* the wall runs from the raster's top edge to its bottom, out of reach
+         * itself: the void's flood crosses it but does not take it, or the
+         * cliff would be dug into a trench at zero */
+        if (walled[mid + 100] < 150.0f)
+            return fail("a wall touching the raster's edge was flooded as void");
+        memcpy(split, first, sizeof split);
+        if (isofill_diffuse_wall(split, all, NULL, wl, EW, EW) != 0)
+            return fail("isofill_diffuse_wall returned an error");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (memcmp(&split[i], &walled[i], sizeof *split))
+                return fail("the first pass then isofill_diffuse_wall is not isofill_run_layers");
+    }
+
+    /*
      * What a `threads` of zero means. It used to mean "leave the runtime
      * alone", which is every core - so the binary left two free and every
      * library caller took the lot, on a machine somebody might be drawing on.
@@ -405,7 +468,7 @@ int main(void)
     }
 
     printf("libisofill %s: fills between contours, keeps the first pass, "
-           "diffuses a box against a written rim, holds cells for the second pass and in reach, "
+           "diffuses a box against a written rim, holds cells for the second pass and in reach, keeps either side of a wall, "
            "leaves inputs alone, "
            "defaults to all but two cores, refuses nonsense\n",
            isofill_version());

@@ -37,7 +37,7 @@
 #define NODATA (-32768.0f)
 
 static float cons[ROWS][COLS], held[ROWS][COLS];
-static unsigned char mask[ROWS][COLS], water[ROWS][COLS];
+static unsigned char mask[ROWS][COLS], water[ROWS][COLS], wall[ROWS][COLS];
 
 static int fail(const char *what)
 {
@@ -163,6 +163,9 @@ int main(void)
             /* sea in the south west, behind a coast drawn at zero */
             water[y][x] = (y > 560 && x < 300) ? 1 : 0;
             held[y][x] = NODATA;
+            /* a cliff down the east of the drawn area, bending, from its top
+             * edge to well past the band joins (0.16.0) */
+            wall[y][x] = (y > 40 && y < 600 && x == (int) (700 + 30 * sin(y / 70.0))) ? 1 : 0;
         }
     /* a river falling 120 m to 10 m from north to south down a gentle bend,
      * through the void north of the drawn area and into the sea - more rows
@@ -182,14 +185,16 @@ int main(void)
     if (write_tif(path, GDT_Byte, water)) return fail("cannot write water.tif");
     snprintf(path, sizeof path, "%s/held.tif", dir);
     if (write_tif(path, GDT_Float32, held)) return fail("cannot write held.tif");
+    snprintf(path, sizeof path, "%s/wall.tif", dir);
+    if (write_tif(path, GDT_Byte, wall)) return fail("cannot write wall.tif");
 
     snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask \"%s/mask.tif\" --water \"%s/water.tif\" "
-             "--held \"%s/held.tif\" --max-mem 4096 \"%s/cons.tif\" \"%s/whole.tif\" 2>\"%s/whole.log\"",
-             dir, dir, dir, dir, dir, dir);
+             "--held \"%s/held.tif\" --wall \"%s/wall.tif\" --max-mem 4096 \"%s/cons.tif\" \"%s/whole.tif\" "
+             "2>\"%s/whole.log\"", dir, dir, dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the whole run failed");
     snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask \"%s/mask.tif\" --water \"%s/water.tif\" "
-             "--held \"%s/held.tif\" --max-mem 1 \"%s/cons.tif\" \"%s/ooc.tif\" 2>\"%s/ooc.log\"",
-             dir, dir, dir, dir, dir, dir);
+             "--held \"%s/held.tif\" --wall \"%s/wall.tif\" --max-mem 1 \"%s/cons.tif\" \"%s/ooc.tif\" "
+             "2>\"%s/ooc.log\"", dir, dir, dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the out-of-core run failed");
 
     /* that it really went out of core: the log says how much of the second

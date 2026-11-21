@@ -154,7 +154,7 @@ static int compare(int cols, int rows, int radius, int barrier, int lines, int l
         }
     }
     build_sat(&b);
-    dilate(&b, barrier);
+    dilate(&b, barrier, NULL);
     {
         int bad = 0;
         long long nc = 0, nv = 0;

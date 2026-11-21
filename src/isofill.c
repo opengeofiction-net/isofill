@@ -291,7 +291,7 @@ static inline int blocks(const Band *b, int x, int y)
     return b->blk[(size_t) y * b->cols + x];
 }
 
-static void dilate(Band *b, int n)
+static void dilate(Band *b, int n, const unsigned char *wall)
 {
     unsigned char *tmp;
     int x, y, k;
@@ -299,8 +299,11 @@ static void dilate(Band *b, int n)
     b->blk = malloc((size_t) b->cols * b->rows);
     if (!b->blk) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
     {
+        /* a wall (--wall) hides what is behind it as a constraint does, and
+         * is widened with them: a cliff drawn as a line has the diagonal gaps
+         * a contour has */
         size_t i, m = (size_t) b->cols * b->rows;
-        for (i = 0; i < m; i++) b->blk[i] = b->run[i] == 0;
+        for (i = 0; i < m; i++) b->blk[i] = b->run[i] == 0 || (wall && wall[i]);
     }
     if (n <= 0) return;
 
@@ -643,7 +646,7 @@ static void big_free(void *p)
 }
 
 static int diffuse(elev *v, unsigned char **water, unsigned char **mask,
-                   int cols, int rows, int edge_void);
+                   unsigned char **wall, int cols, int rows, int edge_void);
 
 /*
  * Pass 2 the way the original ran it. It never saw more than one tile: 512
@@ -763,8 +766,35 @@ static inline float edge_diag(int x, int y, int cols, int rows, int mir)
     return (float) (n ? n : 1);
 }
 
+/*
+ * A wall (--wall): a cell the solve leaves out, marked 2 in the finest level's
+ * fixed flags. Its neighbours do not count it, in their sum or their weight -
+ * Neumann across it, so the ground either side of a cliff is solved from its
+ * own side and does not diffuse through. Only the finest level has walls; the
+ * coarse levels only propose corrections, which the finest level's own
+ * equation, wall and all, then takes or leaves (cycle_prolong's line search).
+ *
+ * wsum is the four neighbours' sum without the walls among them, and how many
+ * there were; with none it is the sum the solve always took, in the same
+ * order, so a raster with no wall comes out the same to the bit.
+ */
+#define WALL 2
+
+static inline float wsum(const float *z, const unsigned char *fx, int cols, int rows,
+                         int x, int y, size_t k, int *walls)
+{
+    float s = 0.0f;
+    int n = 0;
+    if (y > 0)        { if (fx[k - (size_t) cols] == WALL) n++; else s += z[k - (size_t) cols]; }
+    if (y < rows - 1) { if (fx[k + (size_t) cols] == WALL) n++; else s += z[k + (size_t) cols]; }
+    if (x > 0)        { if (fx[k - 1] == WALL) n++; else s += z[k - 1]; }
+    if (x < cols - 1) { if (fx[k + 1] == WALL) n++; else s += z[k + 1]; }
+    *walls = n;
+    return s;
+}
+
 static void gs_half(float *z, const unsigned char *fx, int cols, int rows,
-                    int parity, float relax_w, int mir)
+                    int parity, float relax_w, int mir, int wl)
 {
     int y;
 #ifdef _OPENMP
@@ -777,24 +807,35 @@ static void gs_half(float *z, const unsigned char *fx, int cols, int rows,
             size_t k = r + (size_t) x;
             float s;
             if (fx[k]) continue;
-            s  = (y > 0)        ? z[k - (size_t) cols] : 0.0f;
-            s += (y < rows - 1) ? z[k + (size_t) cols] : 0.0f;
-            s += (x > 0)        ? z[k - 1]             : 0.0f;
-            s += (x < cols - 1) ? z[k + 1]             : 0.0f;
+            if (wl) {
+                int nw;
+                float d;
+                s = wsum(z, fx, cols, rows, x, y, k, &nw);
+                if (nw) {
+                    d = edge_diag(x, y, cols, rows, mir) - (float) nw;
+                    if (d > 0.0f) z[k] = s / d;
+                    continue;
+                }
+            } else {
+                s  = (y > 0)        ? z[k - (size_t) cols] : 0.0f;
+                s += (y < rows - 1) ? z[k + (size_t) cols] : 0.0f;
+                s += (x > 0)        ? z[k - 1]             : 0.0f;
+                s += (x < cols - 1) ? z[k + 1]             : 0.0f;
+            }
             z[k] = mir ? s * (relax_w * 4.0f / edge_diag(x, y, cols, rows, 1)) : s * relax_w;
         }
     }
 }
 
 static void gs_sweeps(float *z, const unsigned char *fx, int cols, int rows,
-                      int n, int level, int mir)
+                      int n, int level, int mir, int wl)
 {
     const float w = 0.25f;
     int i;
     (void) level;
     for (i = 0; i < n; i++) {
-        gs_half(z, fx, cols, rows, 0, w, mir);
-        gs_half(z, fx, cols, rows, 1, w, mir);
+        gs_half(z, fx, cols, rows, 0, w, mir, wl);
+        gs_half(z, fx, cols, rows, 1, w, mir, wl);
     }
 }
 
@@ -847,7 +888,7 @@ static int tiles_of(const unsigned char *fx, int cols, int rows, Tiles *T)
  * cells, so they go in parallel. Returns how far a cell moved at most.
  */
 static float cycle_half(float *u, const float *b, const unsigned char *fx,
-                        int cols, int rows, const Tiles *T, int parity, int mir)
+                        int cols, int rows, const Tiles *T, int parity, int mir, int wl)
 {
     int i;
     float most = 0.0f;
@@ -863,13 +904,23 @@ static float cycle_half(float *u, const float *b, const unsigned char *fx,
             for (x = x0 + ((x0 + y + parity) & 1); x < x1; x += 2) {
                 size_t k = r + (size_t) x;
                 float s, v, d;
+                int nw = 0;
                 if (fx[k]) continue;
-                s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
-                s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
-                s += (x > 0)        ? u[k - 1]             : 0.0f;
-                s += (x < cols - 1) ? u[k + 1]             : 0.0f;
-                v = mir ? (s + (b ? b[k] : 0.0f)) / edge_diag(x, y, cols, rows, 1)
-                        : (s + (b ? b[k] : 0.0f)) * 0.25f;
+                if (wl) {
+                    s = wsum(u, fx, cols, rows, x, y, k, &nw);
+                } else {
+                    s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
+                    s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
+                    s += (x > 0)        ? u[k - 1]             : 0.0f;
+                    s += (x < cols - 1) ? u[k + 1]             : 0.0f;
+                }
+                if (nw) {
+                    float dg = edge_diag(x, y, cols, rows, mir) - (float) nw;
+                    if (dg <= 0.0f) continue;
+                    v = (s + (b ? b[k] : 0.0f)) / dg;
+                } else
+                    v = mir ? (s + (b ? b[k] : 0.0f)) / edge_diag(x, y, cols, rows, 1)
+                            : (s + (b ? b[k] : 0.0f)) * 0.25f;
                 d = v - u[k];
                 u[k] = v;
                 if (d < 0) d = -d;
@@ -881,13 +932,13 @@ static float cycle_half(float *u, const float *b, const unsigned char *fx,
 }
 
 static float cycle_smooth(float *u, const float *b, const unsigned char *fx,
-                          int cols, int rows, const Tiles *T, int n, int mir)
+                          int cols, int rows, const Tiles *T, int n, int mir, int wl)
 {
     float most = 0.0f;
     int i;
     for (i = 0; i < n; i++) {
-        float m0 = cycle_half(u, b, fx, cols, rows, T, 0, mir);
-        float m1 = cycle_half(u, b, fx, cols, rows, T, 1, mir);
+        float m0 = cycle_half(u, b, fx, cols, rows, T, 0, mir, wl);
+        float m1 = cycle_half(u, b, fx, cols, rows, T, 1, mir, wl);
         if (m0 > most) most = m0;
         if (m1 > most) most = m1;
     }
@@ -902,13 +953,19 @@ static float cycle_smooth(float *u, const float *b, const unsigned char *fx,
  * fixed one is fixed, and its correction zero.
  */
 static inline float cycle_res(const float *u, const float *b, const unsigned char *fx,
-                              int cols, int rows, int x, int y, int mir)
+                              int cols, int rows, int x, int y, int mir, int wl)
 {
     size_t k;
     float s;
     if (x < 0 || y < 0 || x >= cols || y >= rows) return 0.0f;
     k = (size_t) y * cols + (size_t) x;
     if (fx[k]) return 0.0f;
+    if (wl) {
+        int nw;
+        s = wsum(u, fx, cols, rows, x, y, k, &nw);
+        if (nw)
+            return s + (b ? b[k] : 0.0f) - (edge_diag(x, y, cols, rows, mir) - (float) nw) * u[k];
+    }
     s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
     s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
     s += (x > 0)        ? u[k - 1]             : 0.0f;
@@ -918,7 +975,7 @@ static inline float cycle_res(const float *u, const float *b, const unsigned cha
 
 static void cycle_restrict(const float *u, const float *b, const unsigned char *fx,
                            int cols, int rows, const Tiles *T,
-                           float *cb, const unsigned char *cfx, int ccols, int crows, int mir)
+                           float *cb, const unsigned char *cfx, int ccols, int crows, int mir, int wl)
 {
     static const float w[4] = { 0.25f, 0.75f, 0.75f, 0.25f };
     int i;
@@ -938,7 +995,7 @@ static void cycle_restrict(const float *u, const float *b, const unsigned char *
                 for (dy = 0; dy < 4; dy++)
                     for (dx = 0; dx < 4; dx++)
                         sum += (double) (w[dy] * w[dx])
-                             * cycle_res(u, b, fx, cols, rows, 2 * cx - 1 + dx, 2 * cy - 1 + dy, mir);
+                             * cycle_res(u, b, fx, cols, rows, 2 * cx - 1 + dx, 2 * cy - 1 + dy, mir, wl);
                 cb[(size_t) cy * ccols + (size_t) cx] = (float) sum;
             }
         }
@@ -985,7 +1042,7 @@ static inline float cycle_e(const float *ce, int ccols, int crows,
 
 static float cycle_prolong(const float *ce, int ccols, int crows, float *u, const float *b,
                            const unsigned char *fx, int cols, int rows, const Tiles *T,
-                           double *sums, int mir)
+                           double *sums, int mir, int wl)
 {
     int i;
     float most = 0.0f;
@@ -1007,23 +1064,31 @@ static float cycle_prolong(const float *ce, int ccols, int crows, float *u, cons
             int x;
             for (x = x0; x < x1; x++) {
                 size_t k = (size_t) y * cols + (size_t) x;
-                float e, s, ae;
+                float e, s, ae, dg;
+                int nw = 0;
                 if (fx[k]) continue;
                 e = cycle_e(ce, ccols, crows, fx, cols, rows, x, y, mir);
                 if (e == 0.0f) continue;
-                s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
-                s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
-                s += (x > 0)        ? u[k - 1]             : 0.0f;
-                s += (x < cols - 1) ? u[k + 1]             : 0.0f;
+                if (wl) {
+                    s = wsum(u, fx, cols, rows, x, y, k, &nw);
+                } else {
+                    s  = (y > 0)        ? u[k - (size_t) cols] : 0.0f;
+                    s += (y < rows - 1) ? u[k + (size_t) cols] : 0.0f;
+                    s += (x > 0)        ? u[k - 1]             : 0.0f;
+                    s += (x < cols - 1) ? u[k + 1]             : 0.0f;
+                }
+                /* the weight less the walls beside it; a wall's cycle_e is
+                 * zero, as any fixed cell's, so it drops out of the sum below */
+                dg = edge_diag(x, y, cols, rows, mir) - (float) nw;
                 /* off the raster cycle_e is zero; mirrored, such a
                  * neighbour is no neighbour, and the weight is the count */
-                ae = edge_diag(x, y, cols, rows, mir) * e
+                ae = dg * e
                               - cycle_e(ce, ccols, crows, fx, cols, rows, x, y - 1, mir)
                               - cycle_e(ce, ccols, crows, fx, cols, rows, x, y + 1, mir)
                               - cycle_e(ce, ccols, crows, fx, cols, rows, x - 1, y, mir)
                               - cycle_e(ce, ccols, crows, fx, cols, rows, x + 1, y, mir);
                 re  += (double) e * ((double) s + (b ? b[k] : 0.0f)
-                                     - (double) edge_diag(x, y, cols, rows, mir) * u[k]);
+                                     - (double) dg * u[k]);
                 eae += (double) e * ae;
             }
         }
@@ -1079,6 +1144,7 @@ static void diffuse_restrict(const float *z, const unsigned char *fx, int cols, 
                     size_t k;
                     if (y >= rows || x >= cols) continue;
                     k = (size_t) y * cols + (size_t) x;
+                    if (fx[k] == WALL) continue;      /* no ground of its own */
                     sa += z[k]; na++;
                     if (fx[k]) { sf += z[k]; nf++; }
                 }
@@ -1182,7 +1248,7 @@ static int mark_void(const unsigned char *oor, const unsigned char *mask,
  * and zero elsewhere, fx says which is which. Coarse to fine over a pyramid,
  * because relaxation moves information one cell per sweep.
  */
-static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows, int mir)
+static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows, int mir, int wl)
 {
     float *z[DIFFUSE_LEVELS];
     unsigned char *fx[DIFFUSE_LEVELS];
@@ -1202,7 +1268,7 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows, int 
         n++;
     }
 
-    gs_sweeps(z[n - 1], fx[n - 1], lc[n - 1], lr[n - 1], DIFFUSE_COARSE, n - 1, mir);
+    gs_sweeps(z[n - 1], fx[n - 1], lc[n - 1], lr[n - 1], DIFFUSE_COARSE, n - 1, mir, wl && n == 1);
     for (i = n - 2; i >= 0; i--) {
         size_t m = (size_t) lc[i] * lr[i], j;
         float *fine = (i == 0) ? NULL : big_alloc(m * sizeof *fine, 0);
@@ -1228,7 +1294,7 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows, int 
             big_free(z[i]);
             z[i] = fine;
         }
-        gs_sweeps(z[i], fx[i], lc[i], lr[i], DIFFUSE_SWEEPS, i, mir);
+        gs_sweeps(z[i], fx[i], lc[i], lr[i], DIFFUSE_SWEEPS, i, mir, wl && i == 0);
     }
 
     /*
@@ -1249,18 +1315,19 @@ static int solve_pyramid(float *z0, unsigned char *fx0, int cols, int rows, int 
          * which is the finest: halving a level never adds a tile */
         if (!bad && !(sums = malloc((2 * (size_t) T[0].n + 2) * sizeof *sums))) bad = 1;
         for (cycle = 0; !bad && cycle < CYCLE_CAP; cycle++) {
-            float moved = cycle_smooth(z[0], NULL, fx[0], lc[0], lr[0], &T[0], CYCLE_SMOOTH, mir);
+            float moved = cycle_smooth(z[0], NULL, fx[0], lc[0], lr[0], &T[0], CYCLE_SMOOTH, mir, wl);
             for (i = 0; i < n - 1; i++) {
-                if (i > 0) cycle_smooth(z[i], b[i], fx[i], lc[i], lr[i], &T[i], CYCLE_SMOOTH, mir);
+                if (i > 0) cycle_smooth(z[i], b[i], fx[i], lc[i], lr[i], &T[i], CYCLE_SMOOTH, mir, 0);
                 cycle_restrict(z[i], i ? b[i] : NULL, fx[i], lc[i], lr[i], &T[i],
-                               b[i + 1], fx[i + 1], lc[i + 1], lr[i + 1], mir);
+                               b[i + 1], fx[i + 1], lc[i + 1], lr[i + 1], mir, wl && i == 0);
                 memset(z[i + 1], 0, (size_t) lc[i + 1] * lr[i + 1] * sizeof *z[i + 1]);
             }
-            cycle_smooth(z[n - 1], b[n - 1], fx[n - 1], lc[n - 1], lr[n - 1], &T[n - 1], CYCLE_COARSE, mir);
+            cycle_smooth(z[n - 1], b[n - 1], fx[n - 1], lc[n - 1], lr[n - 1], &T[n - 1], CYCLE_COARSE, mir, 0);
             for (i = n - 2; i >= 0; i--) {
                 float m = cycle_prolong(z[i + 1], lc[i + 1], lr[i + 1], z[i], i ? b[i] : NULL,
-                                        fx[i], lc[i], lr[i], &T[i], sums, mir);
-                float p = cycle_smooth(z[i], i ? b[i] : NULL, fx[i], lc[i], lr[i], &T[i], CYCLE_SMOOTH, mir);
+                                        fx[i], lc[i], lr[i], &T[i], sums, mir, wl && i == 0);
+                float p = cycle_smooth(z[i], i ? b[i] : NULL, fx[i], lc[i], lr[i], &T[i], CYCLE_SMOOTH, mir,
+                                       wl && i == 0);
                 if (i == 0) moved += m + p;
             }
             if (moved < CYCLE_TOL) break;
@@ -1290,7 +1357,7 @@ oom:
  * the pyramid above it. The out-of-reach and void flags are gone by the time
  * the pyramid is built, so they do not set the peak.
  */
-static double diffuse_mb(int cols, int rows)
+static double diffuse_mb(int cols, int rows, int masks)
 {
     double cells = (double) cols * rows;
     /*
@@ -1298,17 +1365,59 @@ static double diffuse_mb(int cols, int rows)
      * mask rasters the caller reads whole and this holds until they have been
      * classified. Leaving those two out understated zone-axian by 4.2 GB.
      * The cycles' right sides, a third of a float a cell, come after the masks
-     * are let go, so the peak is still this one.
+     * are let go, so the peak is still this one. masks is how many of those
+     * there are: water and mask, and a wall's (0.16.0) a third.
      */
-    return (cells * ((4.0 + 1.0) * (1.0 + 1.0 / 3.0) + 2.0)) / (1024 * 1024);
+    return (cells * ((4.0 + 1.0) * (1.0 + 1.0 / 3.0) + (double) masks)) / (1024 * 1024);
 }
 #endif
 
+/*
+ * A wall cell's own value, once the ground either side of it is solved: the
+ * highest of its neighbours that are not walls - the top of the cliff, which
+ * is where OSM draws one. A few passes, for a wall two cells thick where a
+ * line turns; one walled in on every side is left at what it had.
+ */
+static void wall_values(float *z, unsigned char *fx, int cols, int rows)
+{
+    const unsigned char valued = 3;    /* this pass's; not taken from until the next */
+    int pass, y, x, left = 1;
+    for (pass = 0; pass < 4 && left; pass++) {
+        left = 0;
+        for (y = 0; y < rows; y++)
+            for (x = 0; x < cols; x++) {
+                size_t k = (size_t) y * cols + (size_t) x;
+                size_t nb[4];
+                float best = 0.0f;
+                int n = 0, any = 0, j;
+                if (fx[k] != WALL) continue;
+                if (y > 0) nb[n++] = k - (size_t) cols;
+                if (y < rows - 1) nb[n++] = k + (size_t) cols;
+                if (x > 0) nb[n++] = k - 1;
+                if (x < cols - 1) nb[n++] = k + 1;
+                for (j = 0; j < n; j++) {
+                    if (fx[nb[j]] == WALL || fx[nb[j]] == valued) continue;
+                    if (!any || z[nb[j]] > best) best = z[nb[j]];
+                    any = 1;
+                }
+                if (any) { z[k] = best; fx[k] = valued; }
+                else left = 1;
+            }
+        for (y = 0; y < rows; y++)
+            for (x = 0; x < cols; x++) {
+                size_t k = (size_t) y * cols + (size_t) x;
+                if (fx[k] == valued) fx[k] = 1;
+            }
+    }
+}
+
 static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
-                   int cols, int rows, int edge_void)
+                   unsigned char **wallp, int cols, int rows, int edge_void)
 {
     const unsigned char *water = waterp ? *waterp : NULL;
     const unsigned char *mask = maskp ? *maskp : NULL;
+    const unsigned char *wall = wallp ? *wallp : NULL;
+    int walls = 0;
     size_t k, cells = (size_t) cols * rows;
     unsigned char *oor = big_alloc(cells, 1), *vd;
     unsigned char *fx = big_alloc(cells, 0);
@@ -1319,13 +1428,20 @@ static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
         big_free(oor); big_free(fx);
         if (waterp) { big_free(*waterp); *waterp = NULL; }
         if (maskp)  { big_free(*maskp);  *maskp  = NULL; }
+        if (wallp)  { big_free(*wallp);  *wallp  = NULL; }
         return -2;
     }
-    for (k = 0; k < cells; k++) oor[k] = (v[k] == OUT_OF_REACH);
+    /* a wall the first pass did not answer is passable to the void's flood,
+     * which crosses a cliff in ground nobody described - and is never itself
+     * held at zero, below: a cliff touching the void would otherwise be
+     * flooded end to end and dug into a trench at sea level */
+    for (k = 0; k < cells; k++)
+        oor[k] = (v[k] == OUT_OF_REACH) || (wall && wall[k] && is_unset(v[k]));
     if (mark_void(oor, mask, cols, rows, edge_void, &vd) != 0) {
         big_free(oor); big_free(fx);
         if (waterp) { big_free(*waterp); *waterp = NULL; }
         if (maskp)  { big_free(*maskp);  *maskp  = NULL; }
+        if (wallp)  { big_free(*wallp);  *wallp  = NULL; }
         return -2;
     }
     big_free(oor);
@@ -1336,7 +1452,17 @@ static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
      * zone-axian, eight gigabytes of it.
      */
     for (k = 0; k < cells; k++) {
-        if ((mask && !mask[k]) || (vd && vd[k]) || (water && water[k])) {
+        if ((mask && !mask[k]) || (water && water[k])) {
+            fx[k] = 1;
+            v[k] = 0.0f;
+        } else if (wall && wall[k] && is_unset(v[k])) {
+            /* a wall the first pass did not answer - one it did, a cliff's
+             * top burned as a constraint, is ground like any other; before
+             * the void, which it never is */
+            fx[k] = WALL;
+            v[k] = 0.0f;
+            walls = 1;
+        } else if (vd && vd[k]) {
             fx[k] = 1;
             v[k] = 0.0f;
         } else {
@@ -1350,9 +1476,12 @@ static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
     big_free(vd);
     if (waterp) { big_free(*waterp); *waterp = NULL; }
     if (maskp)  { big_free(*maskp);  *maskp  = NULL; }
+    if (wallp)  { big_free(*wallp);  *wallp  = NULL; }
     {
         /* the edge not the end of the drawn ground: mirrored, not zero */
-        int rc = solve_pyramid(v, fx, cols, rows, !edge_void);
+        int rc = solve_pyramid(v, fx, cols, rows, !edge_void, walls);
+        if (rc == 0 && walls)
+            wall_values(v, fx, cols, rows);
         big_free(fx);
         return rc;
     }
@@ -1462,7 +1591,8 @@ static long long held_reach(elev *v, const unsigned char *rowd, int cols, int ro
  * becomes NO_ELEV. mask, if given, is the h output rows only.
  */
 static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
-                            const unsigned char *mask, const Rays *rays, int radius,
+                            const unsigned char *mask, const unsigned char *wall,
+                            const Rays *rays, int radius,
                             double grad_min, int barrier, int has_nd, double nd,
                             elev *out)
 {
@@ -1487,7 +1617,7 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
         }
     }
     build_sat(&b);
-    dilate(&b, barrier);
+    dilate(&b, barrier, wall);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 16) reduction(+:filled)
 #endif
@@ -1508,6 +1638,12 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
                 continue;
             }
             val = radius_value(&b, rays, radius, grad_min, barrier, xx, y + margin);
+            /* a wall is never answered across: declined, so the second pass
+             * leaves it out - unless nothing reaches it, which the void flood
+             * has to be able to cross, or it is a constraint itself */
+            if (wall && wall[(size_t) (y + margin) * cols + xx] && val != OUT_OF_REACH
+                && !have(&b, xx, y + margin))
+                val = NO_ELEV;
             out[k] = val;
             if (val != NO_ELEV && val != OUT_OF_REACH && val != ONE_LEVEL) filled++;
         }
@@ -1596,6 +1732,19 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
                            const float *held, int cols, int rows,
                            const isofill_params *p, float *out, float *pass1_out)
 {
+    isofill_layers L;
+    memset(&L, 0, sizeof L);
+    L.mask = mask; L.water = water; L.held = held;
+    return isofill_run_layers(constraints, has_nodata, nodata, &L, cols, rows, p, out, pass1_out);
+}
+
+long long isofill_run_layers(const float *constraints, int has_nodata, double nodata,
+                             const isofill_layers *L, int cols, int rows,
+                             const isofill_params *p, float *out, float *pass1_out)
+{
+    const unsigned char *mask = L ? L->mask : NULL, *water = L ? L->water : NULL;
+    const unsigned char *wall = L ? L->wall : NULL;
+    const float *held = L ? L->held : NULL;
     size_t n, k;
     Rays *rays;
     elev *v;
@@ -1610,7 +1759,7 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
     v = malloc(n * sizeof *v);
     if (!v) { rays_free(rays); return -2; }
     memcpy(v, constraints, n * sizeof *v);
-    filled = pass1_core(v, cols, rows, 0, rows, mask, rays, p->radius, p->grad_min,
+    filled = pass1_core(v, cols, rows, 0, rows, mask, wall, rays, p->radius, p->grad_min,
                         p->barrier, has_nodata, nodata, out);
     free(v);
     rays_free(rays);
@@ -1619,7 +1768,7 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
     if (pass1_out)
         memcpy(pass1_out, out, n * sizeof *out);
     if (p->pass2) {
-        unsigned char *wbuf = NULL, *mbuf = NULL;
+        unsigned char *wbuf = NULL, *mbuf = NULL, *lbuf = NULL;
         /* after pass1_out is taken: that is the first pass, which never saw these */
         if (held && isofill_hold(out, held, cols, rows, p->radius) != 0)
             return -2;
@@ -1633,8 +1782,13 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
             if (!mbuf) { free(wbuf); return -2; }
             memcpy(mbuf, mask, n);
         }
-        if (diffuse(out, &wbuf, &mbuf, cols, rows, p->edge_void) != 0)  /* frees both copies */
-            return -2;
+        if (wall) {
+            lbuf = malloc(n);
+            if (!lbuf) { free(wbuf); free(mbuf); return -2; }
+            memcpy(lbuf, wall, n);
+        }
+        if (diffuse(out, &wbuf, &mbuf, wall ? &lbuf : NULL, cols, rows, p->edge_void) != 0)
+            return -2;                      /* it frees the copies, however it leaves */
         /* outside the mask nothing is filled, so nothing is left there */
         if (mask)
             for (k = 0; k < n; k++) if (!mask[k]) out[k] = 0;
@@ -1662,8 +1816,15 @@ int isofill_hold(float *surface, const float *held, int cols, int rows, int radi
 int isofill_diffuse(float *surface, const unsigned char *mask,
                     const unsigned char *water, int cols, int rows)
 {
+    return isofill_diffuse_wall(surface, mask, water, NULL, cols, rows);
+}
+
+int isofill_diffuse_wall(float *surface, const unsigned char *mask,
+                         const unsigned char *water, const unsigned char *wall,
+                         int cols, int rows)
+{
     size_t n;
-    unsigned char *mbuf = NULL, *wbuf = NULL;
+    unsigned char *mbuf = NULL, *wbuf = NULL, *lbuf = NULL;
     if (!surface || cols <= 0 || rows <= 0)
         return -1;
     n = (size_t) cols * rows;
@@ -1681,9 +1842,15 @@ int isofill_diffuse(float *surface, const unsigned char *mask,
         if (!wbuf) { free(mbuf); return -2; }
         memcpy(wbuf, water, n);
     }
+    if (wall) {
+        lbuf = malloc(n);
+        if (!lbuf) { free(mbuf); free(wbuf); return -2; }
+        memcpy(lbuf, wall, n);
+    }
     /* a box held at its rim: the rim is the edge, and the void is the whole
      * raster's to decide, so the edge seeds as it always has */
-    return diffuse(surface, water ? &wbuf : NULL, mask ? &mbuf : NULL, cols, rows, 1);
+    return diffuse(surface, water ? &wbuf : NULL, mask ? &mbuf : NULL, wall ? &lbuf : NULL,
+                   cols, rows, 1);
 }
 
 /* ------------------------------------------------------------------ the binary */
@@ -1729,6 +1896,9 @@ static void usage(void)
         "  --water FILE   a raster the size of the constraints: where it is not\n"
         "                 zero the cell is water, held at zero by the second\n"
         "                 pass so the fill cannot cross it\n"
+        "  --wall FILE    a raster the size of the constraints: where it is not\n"
+        "                 zero the cell is a wall - a cliff. The first pass does\n"
+        "                 not see past it, the second does not diffuse across it\n"
         "  --held FILE    a Float32 raster the size of the constraints: where it\n"
         "                 has a value (not its nodata, not NaN) the cell is held\n"
         "                 at that value by the second pass. The first pass does\n"
@@ -1756,13 +1926,13 @@ static void usage(void)
  * table is the reason this matters: it is eight bytes a cell, and on a zone of
  * 2.5 gigapixels that alone is twenty gigabytes.
  */
-static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
+static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb, GDALRasterBandH lb,
                             const Rays *rays, int radius,
                             double grad_min, int barrier, int has_nd, double nd,
                             int cols, int rows, int y0, int h,
                             elev *out)
 {
-    unsigned char *mask = NULL;
+    unsigned char *mask = NULL, *wall = NULL;
     int top = y0 - radius, bot = y0 + h + radius;
     int bh, margin;
     long long filled;
@@ -1788,8 +1958,16 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
         IO_(GDALRasterIO(mb, GF_Read, 0, y0, cols, h, mask, cols, h,
                          GDT_Byte, 0, 0));
     }
-    filled = pass1_core(v, cols, bh, margin, h, mask, rays, radius, grad_min,
+    /* the wall as the constraints are read, margin and all: it hides what
+     * is behind it from a cell a radius off, in the next band */
+    if (lb) {
+        wall = malloc((size_t) cols * bh);
+        if (!wall) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+        IO_(GDALRasterIO(lb, GF_Read, 0, top, cols, bh, wall, cols, bh, GDT_Byte, 0, 0));
+    }
+    filled = pass1_core(v, cols, bh, margin, h, mask, wall, rays, radius, grad_min,
                         barrier, has_nd, nd, out);
+    free(wall);
     free(mask);
     free(v);
     return filled;
@@ -1798,7 +1976,7 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
 int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
-    const char *water_path = NULL, *held_path = NULL;
+    const char *water_path = NULL, *held_path = NULL, *wall_path = NULL;
     isofill_params d;
     int radius, do_pass2, threads, edge_void, i;
     double grad_min, max_mem = 4096;
@@ -1816,6 +1994,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--mask") && i + 1 < argc) mask_path = argv[++i];
         else if (!strcmp(argv[i], "--water") && i + 1 < argc) water_path = argv[++i];
         else if (!strcmp(argv[i], "--held") && i + 1 < argc) held_path = argv[++i];
+        else if (!strcmp(argv[i], "--wall") && i + 1 < argc) wall_path = argv[++i];
         else if (!strcmp(argv[i], "--barrier") && i + 1 < argc) barrier = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-reach")) ;   /* was a switch, now the only behaviour */
         else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) ++i;   /* the bands' overlap, gone */
@@ -1850,8 +2029,8 @@ int main(int argc, char **argv)
     GDALAllRegister();
     {
         GDALDatasetH src = GDALOpen(in_path, GA_ReadOnly);
-        GDALDatasetH msk = NULL, wat = NULL, hld = NULL;
-        GDALRasterBandH sb, mb = NULL, wb = NULL, hb = NULL;
+        GDALDatasetH msk = NULL, wat = NULL, hld = NULL, wal = NULL;
+        GDALRasterBandH sb, mb = NULL, wb = NULL, hb = NULL, lb = NULL;
         int cols, rows, has_nd = 0, held_has_nd = 0;
         double held_nd = 0;
         double nd, gt[6], whole_mb;
@@ -1903,6 +2082,18 @@ int main(int argc, char **argv)
             hb = GDALGetRasterBand(hld, 1);
             held_nd = GDALGetRasterNoDataValue(hb, &held_has_nd);
         }
+        if (wall_path) {
+            wal = GDALOpen(wall_path, GA_ReadOnly);
+            if (!wal) {
+                fprintf(stderr, "isofill: cannot open %s\n", wall_path); return 1;
+            }
+            if (GDALGetRasterXSize(wal) != cols || GDALGetRasterYSize(wal) != rows) {
+                fprintf(stderr, "isofill: wall is %dx%d, constraints are %dx%d\n",
+                        GDALGetRasterXSize(wal), GDALGetRasterYSize(wal), cols, rows);
+                return 1;
+            }
+            lb = GDALGetRasterBand(wal, 1);
+        }
         rays = rays_build(radius);
 
         whole_mb = isofill_whole_mb(cols, rows);
@@ -1911,6 +2102,8 @@ int main(int argc, char **argv)
          * past the second pass a block at a time, and the marks are a byte a
          * cell kept where the second pass keeps its arrays */
         if (hb) whole_mb += (double) cols * rows * (sizeof(float) + 1) / (1024 * 1024);
+        /* and the wall, a byte a cell, held through both passes in core */
+        if (lb) whole_mb += (double) cols * rows / (1024 * 1024);
 
         opts = CSLSetNameValue(opts, "TILED", "YES");
         /*
@@ -1946,9 +2139,10 @@ int main(int argc, char **argv)
             size_t n = (size_t) cols * rows;
             elev *out = malloc(n * sizeof *out);
             elev *cons = malloc(n * sizeof *cons);
-            unsigned char *mbuf = NULL, *wbuf = NULL;
+            unsigned char *mbuf = NULL, *wbuf = NULL, *lbuf = NULL;
             float *hbuf = NULL;
             isofill_params p;
+            isofill_layers L;
             if (!out || !cons) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
             if (GDALRasterIO(sb, GF_Read, 0, 0, cols, rows, cons, cols, rows,
                              GDT_Float32, 0, 0) != CE_None) {
@@ -1964,6 +2158,11 @@ int main(int argc, char **argv)
                 if (!wbuf) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                 IO_(GDALRasterIO(wb, GF_Read, 0, 0, cols, rows, wbuf, cols, rows, GDT_Byte, 0, 0));
             }
+            if (lb) {
+                lbuf = malloc(n);
+                if (!lbuf) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                IO_(GDALRasterIO(lb, GF_Read, 0, 0, cols, rows, lbuf, cols, rows, GDT_Byte, 0, 0));
+            }
             if (hb) {
                 hbuf = malloc(n * sizeof *hbuf);
                 if (!hbuf) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
@@ -1978,9 +2177,9 @@ int main(int argc, char **argv)
              * resolves a zero itself now, so a zero here would answer
              * --threads 4 with all but two */
             p.threads = threads;
-            filled = isofill_run_held(cons, has_nd, nd, mbuf, wbuf, hbuf, cols, rows, &p,
-                                      out, NULL);
-            free(cons); free(mbuf); free(wbuf); free(hbuf);
+            L.mask = mbuf; L.water = wbuf; L.held = hbuf; L.wall = lbuf;
+            filled = isofill_run_layers(cons, has_nd, nd, &L, cols, rows, &p, out, NULL);
+            free(cons); free(mbuf); free(wbuf); free(hbuf); free(lbuf);
             if (filled < 0) {
                 fprintf(stderr, "isofill: %s\n", filled == -2 ? "out of memory" : "bad arguments");
                 return 1;
@@ -2048,7 +2247,7 @@ int main(int argc, char **argv)
 
             for (y0 = 0; y0 < rows; y0 += band_rows) {
                 h = (y0 + band_rows <= rows) ? band_rows : rows - y0;
-                filled += pass1_band(sb, mb, rays, radius, grad_min, barrier, has_nd, nd,
+                filled += pass1_band(sb, mb, lb, rays, radius, grad_min, barrier, has_nd, nd,
                                      cols, rows, y0, h, out);
                 IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Write, 0, y0, cols, h,
                                  out, cols, h, GDT_Float32, 0, 0));
@@ -2074,9 +2273,9 @@ int main(int argc, char **argv)
                      * and the same solve runs over them (see big_alloc), so the
                      * answer is the same to the bit either way.
                      */
-                    int held = diffuse_mb(cols, rows) <= max_mem;
+                    int held = diffuse_mb(cols, rows, 2 + (lb != NULL)) <= max_mem;
                     elev *whole;
-                    unsigned char *wm = NULL, *mm = NULL;
+                    unsigned char *wm = NULL, *mm = NULL, *lm = NULL;
                     char *dir = CPLStrdup(CPLGetPath(out_path));
                     if (!held) {
                         big.on = 1;
@@ -2088,7 +2287,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, held ? "  pass 2: whole raster, %.0f MB of %.0f\n"
                                          : "  pass 2: whole raster, %.0f MB against %.0f - "
                                            "what will not fit in a file beside the output\n",
-                            diffuse_mb(cols, rows), max_mem);
+                            diffuse_mb(cols, rows, 2 + (lb != NULL)), max_mem);
                     IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Read, 0, 0,
                                      cols, rows, whole, cols, rows, GDT_Float32, 0, 0));
                     if (hb) {
@@ -2132,7 +2331,13 @@ int main(int argc, char **argv)
                         IO_(GDALRasterIO(mb, GF_Read, 0, 0, cols, rows, mm, cols, rows,
                                          GDT_Byte, 0, 0));
                     }
-                    if (diffuse(whole, &wm, &mm, cols, rows, edge_void) != 0) {
+                    if (lb) {
+                        lm = big_alloc((size_t) cols * rows, 0);
+                        if (!lm) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                        IO_(GDALRasterIO(lb, GF_Read, 0, 0, cols, rows, lm, cols, rows,
+                                         GDT_Byte, 0, 0));
+                    }
+                    if (diffuse(whole, &wm, &mm, lb ? &lm : NULL, cols, rows, edge_void) != 0) {
                         fprintf(stderr, "isofill: out of memory for pass 2\n");
                         exit(1);
                     }
@@ -2174,6 +2379,7 @@ int main(int argc, char **argv)
         if (msk) GDALClose(msk);
         if (wat) GDALClose(wat);
         if (hld) GDALClose(hld);
+        if (wal) GDALClose(wal);
         GDALClose(src);
         CSLDestroy(opts);
         rays_free(rays);
