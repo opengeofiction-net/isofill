@@ -8,7 +8,9 @@
  * contours as random walks at many levels, far enough apart that the first
  * pass leaves wide ground unreached; a drawn area that does not cover the
  * raster, so there is void reaching its edge; rings that enclose unreached
- * ground the void must not take; and a coast with sea held at zero.
+ * ground the void must not take; a coast with sea held at zero; and a river
+ * held at its own heights by --held, crossing void, sea and unreached ground,
+ * which out of core goes into the second pass a block of rows at a time.
  *
  * Run from the repository root, with ./isofill built. It works in a directory
  * under tests/, or under $TMPDIR if that is set; on Windows always under
@@ -34,7 +36,7 @@
 #define ROWS 700
 #define NODATA (-32768.0f)
 
-static float cons[ROWS][COLS];
+static float cons[ROWS][COLS], held[ROWS][COLS];
 static unsigned char mask[ROWS][COLS], water[ROWS][COLS];
 
 static int fail(const char *what)
@@ -160,7 +162,13 @@ int main(void)
             mask[y][x] = (x < 820 && y > 60 && y < 640) ? 1 : 0;
             /* sea in the south west, behind a coast drawn at zero */
             water[y][x] = (y > 560 && x < 300) ? 1 : 0;
+            held[y][x] = NODATA;
         }
+    /* a river falling 120 m to 10 m from north to south down a gentle bend,
+     * through the void north of the drawn area and into the sea - more rows
+     * than one of the binary's 256-row blocks, so it spans the joins */
+    for (y = 20; y < 690; y++)
+        held[y][(int) (150 + 40 * sin(y / 90.0))] = (float) (120.0 - 110.0 * (y - 20) / 670.0);
     for (i = 0; i < 40; i++) walk((float) (25 * (1 + i % 16)), 700);
     ring(450, 330, 90, 500.0f);          /* encloses ground the radius cannot reach */
     ring(650, 450, 60, 200.0f);
@@ -172,12 +180,16 @@ int main(void)
     if (write_tif(path, GDT_Byte, mask)) return fail("cannot write mask.tif");
     snprintf(path, sizeof path, "%s/water.tif", dir);
     if (write_tif(path, GDT_Byte, water)) return fail("cannot write water.tif");
+    snprintf(path, sizeof path, "%s/held.tif", dir);
+    if (write_tif(path, GDT_Float32, held)) return fail("cannot write held.tif");
 
     snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask \"%s/mask.tif\" --water \"%s/water.tif\" "
-             "--max-mem 4096 \"%s/cons.tif\" \"%s/whole.tif\" 2>\"%s/whole.log\"", dir, dir, dir, dir, dir);
+             "--held \"%s/held.tif\" --max-mem 4096 \"%s/cons.tif\" \"%s/whole.tif\" 2>\"%s/whole.log\"",
+             dir, dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the whole run failed");
     snprintf(cmd, sizeof cmd, ISOFILL " --radius 20 --threads 2 --mask \"%s/mask.tif\" --water \"%s/water.tif\" "
-             "--max-mem 1 \"%s/cons.tif\" \"%s/ooc.tif\" 2>\"%s/ooc.log\"", dir, dir, dir, dir, dir);
+             "--held \"%s/held.tif\" --max-mem 1 \"%s/cons.tif\" \"%s/ooc.tif\" 2>\"%s/ooc.log\"",
+             dir, dir, dir, dir, dir, dir);
     if (system(cmd) != 0) return fail("the out-of-core run failed");
 
     /* that it really went out of core: the log says how much of the second
@@ -213,6 +225,23 @@ int main(void)
          * held the void and the sea at zero */
         if (unset) return fail("a cell the second pass left unset");
         if (zero < COLS * ROWS / 10) return fail("the fixture has too little void or sea to test");
+    }
+    {
+        /* the river came back as itself wherever it is drawn and dry, and the
+         * void and sea beat it */
+        int held_n = 0;
+        for (y = 0; y < ROWS; y++)
+            for (x = 0; x < COLS; x++) {
+                float h = held[y][x], w = whole[y * COLS + x];
+                if (h == NODATA) continue;
+                if (!mask[y][x] || water[y][x]) {
+                    if (w != 0.0f) return fail("a held cell outside the mask or in the sea is not zero");
+                } else {
+                    if (w != h) return fail("a held cell did not come back as its value");
+                    held_n++;
+                }
+            }
+        if (held_n < 300) return fail("too little of the river is held to test");
     }
     if (n_diff) {
         fprintf(stderr, "pass2_ooc: %d of %d cells differ between the whole and the out-of-core run\n",

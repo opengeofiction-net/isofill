@@ -6,6 +6,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include "isofill.h"
 #ifdef _OPENMP
@@ -243,6 +244,76 @@ int main(void)
     }
 
     /*
+     * isofill_run_held: cells held at the caller's values by the second pass,
+     * unseen by the first. The square again, with a river at 150 m the whole
+     * height of column 120, out in the ground neither contour reaches, and
+     * nothing drawn east of the raster (edge_void 0, the east edge out of the
+     * mask). Without the river that ground floods from the east and is held at
+     * zero. With it, the river is ground: the flood stops at it, the ground
+     * west of it is solved between the contours and the river, and the ground
+     * east of it is still void.
+     */
+    {
+        static float hc[EW * EW], hv[EW * EW], none[EW * EW], none1[EW * EW];
+        static float got[EW * EW], got1[EW * EW], nanv[EW * EW];
+        static unsigned char hm[EW * EW], hm2[EW * EW], hw[EW * EW];
+        int yy, xx;
+        size_t i, mid = (size_t) (EW / 2) * EW;
+        for (yy = 0; yy < EW; yy++)
+            for (xx = 0; xx < EW; xx++) {
+                size_t k = (size_t) yy * EW + xx;
+                hc[k] = xx == 4 ? 100.0f : xx == 10 ? 200.0f : NO_ELEV;
+                hv[k] = xx == 120 ? 150.0f : NO_ELEV;
+                nanv[k] = NAN;
+                hm[k] = xx == EW - 1 ? 0 : 1;
+                hm2[k] = hm[k] && !(yy == 40 && xx == 120);     /* one river cell undrawn */
+                hw[k] = yy == 50 && xx == 120;                  /* and one in the water */
+            }
+        isofill_params_default(&p);
+        p.threads = 1;
+        p.edge_void = 0;
+        if (isofill_run_ex(hc, 0, 0.0, hm, NULL, EW, EW, &p, none, none1) < 0)
+            return fail("isofill_run_ex would not fill the held fixture");
+        if (none[mid + 60] != 0.0f || none[mid + 120] != 0.0f)
+            return fail("without the river its ground is not void, so this tests nothing");
+        if (isofill_run_held(hc, 0, 0.0, hm, NULL, hv, EW, EW, &p, got, got1) < 0)
+            return fail("isofill_run_held returned an error");
+        for (yy = 0; yy < EW; yy++)
+            if (got[(size_t) yy * EW + 120] != 150.0f)
+                return fail("a held cell did not come back as its value");
+        if (got[mid + 60] <= 150.0f || got[mid + 60] >= 200.0f || got[mid + 119] <= 149.0f)
+            return fail("the ground between the contours and the held river was not solved to them");
+        if (got[mid + 200] != 0.0f)
+            return fail("the void beyond the held river was not held at zero");
+        /* the first pass never saw them */
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (memcmp(&got1[i], &none1[i], sizeof *got1))
+                return fail("the held cells changed the first pass");
+        /* reached ground is the first pass's, held or not */
+        if (got[mid + 7] != none[mid + 7])
+            return fail("held cells changed ground the contours reach");
+        /* outside the mask and in the water win over held, at zero */
+        if (isofill_run_held(hc, 0, 0.0, hm2, hw, hv, EW, EW, &p, got, NULL) < 0)
+            return fail("isofill_run_held with mask and water returned an error");
+        if (got[(size_t) 40 * EW + 120] != 0.0f || got[(size_t) 50 * EW + 120] != 0.0f)
+            return fail("a held cell beat the mask or the water");
+        if (got[(size_t) 45 * EW + 120] != 150.0f)
+            return fail("a held cell beside the mask and the water did not hold");
+        /* NaN and NO_ELEV are both not held: an all-NaN held is no held at all */
+        if (isofill_run_held(hc, 0, 0.0, hm, NULL, nanv, EW, EW, &p, got, NULL) < 0)
+            return fail("isofill_run_held with nothing held returned an error");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (memcmp(&got[i], &none[i], sizeof *got)) return fail("a held raster of NaN changed the surface");
+        /* and with the second pass off, held is not used */
+        p.pass2 = 0;
+        if (isofill_run_held(hc, 0, 0.0, hm, NULL, hv, EW, EW, &p, got, NULL) < 0)
+            return fail("isofill_run_held with pass2 off returned an error");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (memcmp(&got[i], &none1[i], sizeof *got))
+                return fail("with pass2 off, held cells reached the output");
+    }
+
+    /*
      * What a `threads` of zero means. It used to mean "leave the runtime
      * alone", which is every core - so the binary left two free and every
      * library caller took the lot, on a machine somebody might be drawing on.
@@ -271,7 +342,8 @@ int main(void)
     }
 
     printf("libisofill %s: fills between contours, keeps the first pass, "
-           "diffuses a box against a written rim, leaves inputs alone, "
+           "diffuses a box against a written rim, holds cells for the second pass, "
+           "leaves inputs alone, "
            "defaults to all but two cores, refuses nonsense\n",
            isofill_version());
     return 0;

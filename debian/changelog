@@ -1,3 +1,24 @@
+isofill (0.14.0) unstable; urgency=medium
+
+  * --held FILE, isofill_run_held() in the library: cells held at the
+    caller's values by the second pass, unseen by the first. Written over
+    the first pass's answer before the second classifies anything, so a
+    held cell is ground, not void, and the flood stops at it; outside the
+    mask and in the water still win, at zero. For a graded river (danu
+    #372), whose heights beside a near-equal contour made the first pass
+    fill the ground flat to the edge of its reach.
+  * isofill_run_ex() is isofill_run_held() with nothing held; the surface
+    without --held is unchanged, to the bit.
+  * Out of core the held raster goes into the second pass a block of rows
+    at a time; in core it is read whole and counted towards --max-mem.
+  * tests/run_lib: a held river stops the void flood, the ground between
+    it and the contours is solved to both, the first pass is untouched,
+    the mask and water beat it, NaN is not held, --no-pass2 ignores it.
+    tests/pass2_ooc holds a river across its fixture, whole and out of
+    core the same to the bit.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Sat, 21 Nov 2026 11:24:01 +0000
+
 isofill (0.13.0) unstable; urgency=medium
 
   * --no-edge-void, edge_void in isofill_params: the raster's edge is not
