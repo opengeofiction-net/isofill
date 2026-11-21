@@ -385,7 +385,7 @@ static elev radius_value(const Band *b, const Rays *r, int radius,
      * gives.
      *
      * The circle is met a row at a time instead, the rows outward from the
-     * cell's own so that the near levels are found early, and along each row
+     * cell's own so that the by_wall levels are found early, and along each row
      * only the constraints, by the run table. A constraint whose level is
      * already held at a nearer index cannot change anything, and neither can a
      * new level farther than all MAX_LEVELS held: no line of sight is walked to
@@ -842,7 +842,7 @@ static void gs_sweeps(float *z, const unsigned char *fx, int cols, int rows,
 /*
  * The tiles of a level with a free cell in them. A tile without one has
  * nothing to move and nothing left unsolved, so passing it over is exact, and
- * most of a raster is such tiles - the first pass answers the ground near
+ * most of a raster is such tiles - the first pass answers the ground by_wall
  * contours whole.
  */
 #define CYCLE_TILE 64
@@ -1022,7 +1022,7 @@ static inline float cycle_e(const float *ce, int ccols, int crows,
     if (x < 0 || y < 0 || x >= cols || y >= rows || fx[(size_t) y * cols + x]) return 0.0f;
     if (ix >= ccols) ix = ccols - 1;
     if (iy >= crows) iy = crows - 1;
-    /* the near coarse cell three quarters, the next one over a quarter, on each
+    /* the by_wall coarse cell three quarters, the next one over a quarter, on each
      * axis; a coarse cell beyond the raster is zero, as the cells beyond it are */
     jx = (x & 1) ? ix + 1 : ix - 1;
     jy = (y & 1) ? iy + 1 : iy - 1;
@@ -1542,7 +1542,7 @@ static void held_rows(const float *h, int cols, int nrows, int r, unsigned char 
 {
     int y;
     /* a radius past the raster reaches the whole row, and x + r + 1 below
-     * must not overflow for one a caller passes near INT_MAX */
+     * must not overflow for one a caller passes by_wall INT_MAX */
     if (r > cols) r = cols;
     for (y = 0; y < nrows; y++) {
         const float *row = h + (size_t) y * cols;
@@ -1597,7 +1597,7 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
 {
     long long filled = 0;
     int y;
-    unsigned char *near = NULL;
+    unsigned char *by_wall = NULL;
     Band b;
     b.cols = cols; b.rows = bh;
     b.v = v;
@@ -1624,19 +1624,19 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
         size_t i, m = (size_t) cols * bh;
         int k2, xx2, yy2, reach = barrier + 1;
         unsigned char *t;
-        near = malloc(m);
+        by_wall = malloc(m);
         t = malloc(m);
-        if (!near || !t) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
-        for (i = 0; i < m; i++) near[i] = wall[i] != 0;
+        if (!by_wall || !t) { fprintf(stderr, "isofill: out of memory\n"); exit(1); }
+        for (i = 0; i < m; i++) by_wall[i] = wall[i] != 0;
         for (k2 = 0; k2 < reach; k2++) {
-            memcpy(t, near, m);
+            memcpy(t, by_wall, m);
             for (yy2 = 0; yy2 < bh; yy2++)
                 for (xx2 = 0; xx2 < cols; xx2++) {
                     size_t j = (size_t) yy2 * cols + xx2;
                     if (t[j]) continue;
                     if ((xx2 > 0 && t[j - 1]) || (xx2 + 1 < cols && t[j + 1])
                         || (yy2 > 0 && t[j - cols]) || (yy2 + 1 < bh && t[j + cols]))
-                        near[j] = 1;
+                        by_wall[j] = 1;
                 }
         }
         free(t);
@@ -1673,7 +1673,7 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
                  * contour: solved from its side. Out of reach, the void's
                  * flood took it and dug a trench at zero down the cliff
                  * (0.16.0) */
-                else if (val == OUT_OF_REACH && near[bk]
+                else if (val == OUT_OF_REACH && by_wall[bk]
                          && sat_count(&b, xx - radius, y + margin - radius,
                                       xx + radius, y + margin + radius) > 0)
                     val = NO_ELEV;
@@ -1682,7 +1682,7 @@ static long long pass1_core(elev *v, int cols, int bh, int margin, int h,
             if (val != NO_ELEV && val != OUT_OF_REACH && val != ONE_LEVEL) filled++;
         }
     }
-    free(b.run); free(b.blk); free(b.sat); free(near);
+    free(b.run); free(b.blk); free(b.sat); free(by_wall);
     return filled;
 }
 
