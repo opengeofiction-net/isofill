@@ -1358,6 +1358,34 @@ static int diffuse(elev *v, unsigned char **waterp, unsigned char **maskp,
     }
 }
 
+/*
+ * Held cells: the caller's values, written over what the first pass left and
+ * so fixed for the second, which never moves a cell that is not a sentinel.
+ * A held cell is neither NO_ELEV nor NaN. Written before diffuse classifies
+ * anything, a held cell is ground the first pass answered as far as the void
+ * flood is concerned - a river through unreached ground is not void, and
+ * neither is the ground it encloses. Outside the mask and water are still
+ * held at zero; diffuse decides those after this, and they win.
+ *
+ * The first pass does not see these. That is the point of them - a graded
+ * river's heights, close in level to the contour beside them, make the
+ * steepest pair in reach a flat one - and it is the caller's to leave them out
+ * of the constraints, which this does not touch.
+ */
+static inline int is_held(float h)
+{
+    return h == h && h != (float) NO_ELEV;
+}
+
+static long long apply_held(elev *v, const float *held, size_t n)
+{
+    long long put = 0;
+    size_t k;
+    for (k = 0; k < n; k++)
+        if (is_held(held[k])) { v[k] = held[k]; put++; }
+    return put;
+}
+
 /* ------------------------------------------------------------------ pass 1 core */
 /*
  * The per-cell work of pass 1 over a band held in memory. The band is bh rows
@@ -1494,6 +1522,15 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
                          int cols, int rows, const isofill_params *p,
                          float *out, float *pass1_out)
 {
+    return isofill_run_held(constraints, has_nodata, nodata, mask, water, NULL,
+                            cols, rows, p, out, pass1_out);
+}
+
+long long isofill_run_held(const float *constraints, int has_nodata, double nodata,
+                           const unsigned char *mask, const unsigned char *water,
+                           const float *held, int cols, int rows,
+                           const isofill_params *p, float *out, float *pass1_out)
+{
     size_t n, k;
     Rays *rays;
     elev *v;
@@ -1518,6 +1555,9 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
         memcpy(pass1_out, out, n * sizeof *out);
     if (p->pass2) {
         unsigned char *wbuf = NULL, *mbuf = NULL;
+        /* after pass1_out is taken: that is the first pass, which never saw these */
+        if (held)
+            apply_held(out, held, n);
         if (water) {
             wbuf = malloc(n);
             if (!wbuf) return -2;
@@ -1571,6 +1611,15 @@ int isofill_diffuse(float *surface, const unsigned char *mask,
 
 /* ------------------------------------------------------------------ main */
 
+/* a held raster's own nodata means not held, as NO_ELEV and NaN do */
+static void held_unset(float *h, size_t n, int has_nd, double nd)
+{
+    size_t k;
+    if (!has_nd) return;
+    for (k = 0; k < n; k++)
+        if (h[k] == (float) nd) h[k] = (float) NO_ELEV;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
@@ -1589,6 +1638,11 @@ static void usage(void)
         "  --water FILE   a raster the size of the constraints: where it is not\n"
         "                 zero the cell is water, held at zero by the second\n"
         "                 pass so the fill cannot cross it\n"
+        "  --held FILE    a Float32 raster the size of the constraints: where it\n"
+        "                 has a value (not its nodata, not NaN) the cell is held\n"
+        "                 at that value by the second pass. The first pass does\n"
+        "                 not see it; leave those cells out of the constraints.\n"
+        "                 Outside --mask and in --water still win, at zero\n"
         "  --no-reach     accepted and ignored. It used to switch on what is now\n"
         "                 the only behaviour; see the note on reach in README.md\n"
         "  --mask FILE    a raster the size of the constraints: where it is zero\n"
@@ -1653,7 +1707,7 @@ static long long pass1_band(GDALRasterBandH sb, GDALRasterBandH mb,
 int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL, *mask_path = NULL;
-    const char *water_path = NULL;
+    const char *water_path = NULL, *held_path = NULL;
     isofill_params d;
     int radius, do_pass2, threads, edge_void, i;
     double grad_min, max_mem = 4096;
@@ -1670,6 +1724,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--max-mem") && i + 1 < argc) max_mem = atof(argv[++i]);
         else if (!strcmp(argv[i], "--mask") && i + 1 < argc) mask_path = argv[++i];
         else if (!strcmp(argv[i], "--water") && i + 1 < argc) water_path = argv[++i];
+        else if (!strcmp(argv[i], "--held") && i + 1 < argc) held_path = argv[++i];
         else if (!strcmp(argv[i], "--barrier") && i + 1 < argc) barrier = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-reach")) ;   /* was a switch, now the only behaviour */
         else if (!strcmp(argv[i], "--pass2-margin") && i + 1 < argc) ++i;   /* the bands' overlap, gone */
@@ -1704,9 +1759,10 @@ int main(int argc, char **argv)
     GDALAllRegister();
     {
         GDALDatasetH src = GDALOpen(in_path, GA_ReadOnly);
-        GDALDatasetH msk = NULL, wat = NULL;
-        GDALRasterBandH sb, mb = NULL, wb = NULL;
-        int cols, rows, has_nd = 0;
+        GDALDatasetH msk = NULL, wat = NULL, hld = NULL;
+        GDALRasterBandH sb, mb = NULL, wb = NULL, hb = NULL;
+        int cols, rows, has_nd = 0, held_has_nd = 0;
+        double held_nd = 0;
         double nd, gt[6], whole_mb;
         Rays *rays;
         GDALDatasetH dst;
@@ -1743,9 +1799,26 @@ int main(int argc, char **argv)
             }
             wb = GDALGetRasterBand(wat, 1);
         }
+        if (held_path) {
+            hld = GDALOpen(held_path, GA_ReadOnly);
+            if (!hld) {
+                fprintf(stderr, "isofill: cannot open %s\n", held_path); return 1;
+            }
+            if (GDALGetRasterXSize(hld) != cols || GDALGetRasterYSize(hld) != rows) {
+                fprintf(stderr, "isofill: held is %dx%d, constraints are %dx%d\n",
+                        GDALGetRasterXSize(hld), GDALGetRasterYSize(hld), cols, rows);
+                return 1;
+            }
+            hb = GDALGetRasterBand(hld, 1);
+            held_nd = GDALGetRasterNoDataValue(hb, &held_has_nd);
+        }
         rays = rays_build(radius);
 
         whole_mb = isofill_whole_mb(cols, rows);
+        /* in core the held values are read whole beside everything else, four
+         * bytes a cell; out of core they go past the second pass a block at a
+         * time and cost nothing to speak of */
+        if (hb) whole_mb += (double) cols * rows * sizeof(float) / (1024 * 1024);
 
         opts = CSLSetNameValue(opts, "TILED", "YES");
         /*
@@ -1782,6 +1855,7 @@ int main(int argc, char **argv)
             elev *out = malloc(n * sizeof *out);
             elev *cons = malloc(n * sizeof *cons);
             unsigned char *mbuf = NULL, *wbuf = NULL;
+            float *hbuf = NULL;
             isofill_params p;
             if (!out || !cons) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
             if (GDALRasterIO(sb, GF_Read, 0, 0, cols, rows, cons, cols, rows,
@@ -1798,6 +1872,12 @@ int main(int argc, char **argv)
                 if (!wbuf) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                 IO_(GDALRasterIO(wb, GF_Read, 0, 0, cols, rows, wbuf, cols, rows, GDT_Byte, 0, 0));
             }
+            if (hb) {
+                hbuf = malloc(n * sizeof *hbuf);
+                if (!hbuf) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                IO_(GDALRasterIO(hb, GF_Read, 0, 0, cols, rows, hbuf, cols, rows, GDT_Float32, 0, 0));
+                held_unset(hbuf, n, held_has_nd, held_nd);
+            }
             p.radius = radius; p.barrier = barrier; p.grad_min = grad_min;
             p.pass2 = do_pass2;
             p.edge_void = edge_void;
@@ -1805,8 +1885,9 @@ int main(int argc, char **argv)
              * resolves a zero itself now, so a zero here would answer
              * --threads 4 with all but two */
             p.threads = threads;
-            filled = isofill_run(cons, has_nd, nd, mbuf, wbuf, cols, rows, &p, out);
-            free(cons); free(mbuf); free(wbuf);
+            filled = isofill_run_held(cons, has_nd, nd, mbuf, wbuf, hbuf, cols, rows, &p,
+                                      out, NULL);
+            free(cons); free(mbuf); free(wbuf); free(hbuf);
             if (filled < 0) {
                 fprintf(stderr, "isofill: %s\n", filled == -2 ? "out of memory" : "bad arguments");
                 return 1;
@@ -1917,6 +1998,22 @@ int main(int argc, char **argv)
                             diffuse_mb(cols, rows), max_mem);
                     IO_(GDALRasterIO(GDALGetRasterBand(p1, 1), GF_Read, 0, 0,
                                      cols, rows, whole, cols, rows, GDT_Float32, 0, 0));
+                    if (hb) {
+                        /* a block of rows at a time, into the surface the
+                         * first pass left: what the library does in one go */
+                        int blk = 256, y;
+                        float *hrow = malloc((size_t) cols * blk * sizeof *hrow);
+                        if (!hrow) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                        for (y = 0; y < rows; y += blk) {
+                            int hh = y + blk <= rows ? blk : rows - y;
+                            size_t m = (size_t) cols * hh;
+                            IO_(GDALRasterIO(hb, GF_Read, 0, y, cols, hh, hrow, cols, hh,
+                                             GDT_Float32, 0, 0));
+                            held_unset(hrow, m, held_has_nd, held_nd);
+                            apply_held(whole + (size_t) y * cols, hrow, m);
+                        }
+                        free(hrow);
+                    }
                     if (wb) {
                         wm = big_alloc((size_t) cols * rows, 0);
                         if (!wm) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
@@ -1970,6 +2067,7 @@ int main(int argc, char **argv)
 
         if (msk) GDALClose(msk);
         if (wat) GDALClose(wat);
+        if (hld) GDALClose(hld);
         GDALClose(src);
         CSLDestroy(opts);
         rays_free(rays);

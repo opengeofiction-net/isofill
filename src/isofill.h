@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.13.0"
+#define ISOFILL_VERSION "0.14.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -95,6 +95,31 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
                          const unsigned char *mask, const unsigned char *water,
                          int cols, int rows, const isofill_params *params,
                          float *out, float *pass1_out);
+
+/*
+ * The same fill, with cells held at the caller's values by the second pass.
+ *
+ * held is cols*rows floats or NULL. A cell is held unless it is
+ * ISOFILL_NO_ELEV or NaN; a held cell is written over whatever the first pass
+ * left there and the second pass keeps it, and the ground round it settles to
+ * it. It counts as ground the first pass answered, so the void flood neither
+ * takes it nor crosses it. Outside the mask and in the water are still held at
+ * zero: those win. With pass2 off, held is not used.
+ *
+ * The first pass does not see held cells - not as constraints, not as
+ * barriers - which is what they are for: a graded river's heights, a whisker
+ * below the contour beside them, make the steepest pair in reach a nearly flat
+ * one, and the ground beside the river fills flat to the edge of the reach.
+ * Held instead, the river is a boundary the solve runs down to. It is the
+ * caller's to leave those cells out of the constraints; this does not touch
+ * them. pass1_out is the first pass as it was, without the held values.
+ *
+ * isofill_run_ex is this with NULL. The binary's --held is this.
+ */
+long long isofill_run_held(const float *constraints, int has_nodata, double nodata,
+                           const unsigned char *mask, const unsigned char *water,
+                           const float *held, int cols, int rows,
+                           const isofill_params *params, float *out, float *pass1_out);
 
 /*
  * The second pass on its own, over a surface the first pass has already

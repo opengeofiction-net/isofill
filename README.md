@@ -75,7 +75,9 @@ writing a value into it, since the solve never moves a cell that is not a
 sentinel, a caller can cut a box out of a larger surface, write the rim from the
 last whole-raster answer, and get the second pass for the box alone. That is an
 approximation - diffusion is global - and how good one is depends on how far a
-change travels in the data at hand.
+change travels in the data at hand. `isofill_run_held()` is `isofill_run_ex()`
+with cells held at the caller's values by the second pass, which is `--held`;
+see *Held cells* below.
 
 `isofill_params_default()` hands out the command line's defaults, and that
 includes the threads: a `threads` of zero or less means all but two, the same
@@ -102,6 +104,7 @@ one it was built against, and `isofill --version` prints the same string.
 | `--no-pass2` | leave the cells the first pass declined unset |
 | `--pass2-margin N` | accepted and ignored: the overlap of the bands the second pass used to be solved in out of core |
 | `--water FILE` | a raster the size of the constraints: where it is not zero the cell is water, held at zero by `--pass2 diffuse` |
+| `--held FILE` | a Float32 raster the size of the constraints: where it has a value - not its nodata, not NaN - the cell is held at that value by the second pass. The first pass does not see it; see *Held cells* below |
 | `--no-edge-void` | the raster's edge is not the end of the drawn ground: unreached ground there is solved, the edge mirrored, not held at zero. For a raster that is a piece of a larger area; see *The edge* below |
 | `--max-mem MB` | above this, the first pass works band by band and the second keeps what will not fit in files beside the output - the same answer either way. Default 4096; see below |
 | `--threads N` | default: all but two |
@@ -209,6 +212,28 @@ contour to zero across sixty cells - a gradient of a fifth, which hillshades as
 a dark blob unrelated to the terrain, and is worse than the artefact it fixes.
 What separates the two is where the region reaches, not what the first pass
 said about it. See `mark_void`.
+
+### Held cells
+
+`--held`, and `isofill_run_held()` in the library, give cells a value the second
+pass keeps and the first never sees. Written over the first pass's answer before
+the second classifies anything, a held cell is ground the first pass answered:
+the void flood neither takes it nor crosses it. Outside `--mask` and `--water`
+still win, at zero. With `--no-pass2` it is not used, and the kept first pass
+does not have it.
+
+It is for a line whose heights are known but would mislead the first pass - a
+river graded down its valley (danu #372). As spot heights, a river a few metres
+below the contour beside it is the steepest pair in reach: the ground between
+fills nearly flat to the edge of the reach, and steps up there to meet the
+contour beyond it. Held instead, the river is a boundary the solve runs down to,
+and the valley comes out as a valley. Leaving those cells out of the constraints
+is the caller's job; isofill does not touch the constraints.
+
+In core the held raster is read whole, four bytes a cell, and counted towards
+`--max-mem`; out of core it goes into the second pass's surface a block of rows
+at a time. `tests/pass2_ooc` holds a river in its fixture, so the two agree to
+the bit with it too.
 
 ### The edge
 
