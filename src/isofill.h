@@ -11,7 +11,7 @@
 #ifndef ISOFILL_H
 #define ISOFILL_H
 
-#define ISOFILL_VERSION "0.14.0"
+#define ISOFILL_VERSION "0.15.0"
 
 /* The value a constraints cell holds when it is not a constraint and no
  * nodata value is given; also what --no-pass2 leaves in cells it declined.
@@ -103,8 +103,10 @@ long long isofill_run_ex(const float *constraints, int has_nodata, double nodata
  * ISOFILL_NO_ELEV or NaN; a held cell is written over whatever the first pass
  * left there and the second pass keeps it, and the ground round it settles to
  * it. It counts as ground the first pass answered, so the void flood neither
- * takes it nor crosses it. Outside the mask and in the water are still held at
- * zero: those win. With pass2 off, held is not used.
+ * takes it nor crosses it - and so does the ground within the radius of it
+ * (the square of side 2 radius + 1) that no constraint reaches: that is
+ * declined, and solved, rather than void. Outside the mask and in the water
+ * are still held at zero: those win. With pass2 off, held is not used.
  *
  * The first pass does not see held cells - not as constraints, not as
  * barriers - which is what they are for: a graded river's heights, a whisker
@@ -124,6 +126,20 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
                            const unsigned char *mask, const unsigned char *water,
                            const float *held, int cols, int rows,
                            const isofill_params *params, float *out, float *pass1_out);
+
+/*
+ * The held cells written into a surface the first pass left, as
+ * isofill_run_held does between its passes: each cell within radius of a held
+ * cell (the square of side 2 radius + 1) that the first pass called out of
+ * reach becomes declined, and each held cell takes its value. held is
+ * cols*rows floats, a cell held unless it is ISOFILL_NO_ELEV or NaN; surface
+ * is written in place. isofill_diffuse after it is the rest of
+ * isofill_run_held, cell for cell - for a caller that runs the two passes
+ * apart, as an editor solving a box does.
+ *
+ * Returns 0, or -1 for bad arguments and -2 for out of memory.
+ */
+int isofill_hold(float *surface, const float *held, int cols, int rows, int radius);
 
 /*
  * The second pass on its own, over a surface the first pass has already

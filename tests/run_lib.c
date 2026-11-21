@@ -314,6 +314,69 @@ int main(void)
     }
 
     /*
+     * And a held cell is in reach (0.15.0). The two contours on the left, the
+     * edge seeding the void as it does by default, and a river at 150 m down
+     * column 120 that stops short of the top and bottom: everything right of
+     * the contours' reach floods from the edge and is held at zero, unless it
+     * is within the radius of the river. That ground is solved - between the
+     * river and the void beyond its reach - and what lies beyond the river's
+     * reach is void as it was.
+     */
+    {
+        static float rc[EW * EW], rv[EW * EW], got[EW * EW], none[EW * EW], none1[EW * EW], got1[EW * EW];
+        static unsigned char all[EW * EW];
+        int yy, xx;
+        size_t i, mid = (size_t) (EW / 2) * EW;
+        for (yy = 0; yy < EW; yy++)
+            for (xx = 0; xx < EW; xx++) {
+                size_t k = (size_t) yy * EW + xx;
+                rc[k] = xx == 4 ? 100.0f : xx == 10 ? 200.0f : NO_ELEV;
+                rv[k] = (xx == 120 && yy > 40 && yy < EW - 40) ? 150.0f : NO_ELEV;
+                all[k] = 1;
+            }
+        isofill_params_default(&p);
+        p.threads = 1;
+        if (isofill_run_ex(rc, 0, 0.0, all, NULL, EW, EW, &p, none, none1) < 0)
+            return fail("the reach fixture would not fill");
+        if (isofill_run_held(rc, 0, 0.0, all, NULL, rv, EW, EW, &p, got, got1) < 0)
+            return fail("the reach fixture would not fill with the river held");
+        if (none[mid + 119] != 0.0f || none[mid + 121] != 0.0f)
+            return fail("without the river its ground is not void, so this tests nothing");
+        if (got[mid + 120] != 150.0f)
+            return fail("the river in the void did not hold");
+        if (got[mid + 119] < 100.0f || got[mid + 121] < 100.0f)
+            return fail("the ground beside a held river in unreached ground was taken for void");
+        if (got[mid + 120 + p.radius / 2] <= 0.0f)
+            return fail("the ground within the river's radius was taken for void");
+        if (got[mid + 200] != 0.0f || got[(size_t) 5 * EW + 120] != 0.0f)
+            return fail("ground beyond the river's reach is no longer void");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (memcmp(&got1[i], &none1[i], sizeof *got1))
+                return fail("the river's reach changed the first pass");
+        if (got[mid + 7] != none[mid + 7])
+            return fail("the river's reach changed ground the contours reach");
+        /* and the two passes apart - the first, isofill_hold, isofill_diffuse
+         * - are isofill_run_held, cell for cell */
+        memcpy(none, none1, sizeof none);
+        if (isofill_hold(none, rv, EW, EW, p.radius) != 0)
+            return fail("isofill_hold returned an error");
+        if (isofill_diffuse(none, all, NULL, EW, EW) != 0)
+            return fail("isofill_diffuse after isofill_hold returned an error");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (memcmp(&none[i], &got[i], sizeof *got))
+                return fail("isofill_hold then isofill_diffuse is not isofill_run_held");
+        if (isofill_hold(NULL, rv, EW, EW, p.radius) != -1)
+            return fail("isofill_hold accepted a null surface");
+        /* a radius past the raster reaches all of it, and does not overflow */
+        memcpy(none, none1, sizeof none);
+        if (isofill_hold(none, rv, EW, EW, 2147483647) != 0)
+            return fail("isofill_hold refused a radius past the raster");
+        for (i = 0; i < (size_t) EW * EW; i++)
+            if (none[i] == -32767.0f)
+                return fail("a radius past the raster left a cell out of reach");
+    }
+
+    /*
      * What a `threads` of zero means. It used to mean "leave the runtime
      * alone", which is every core - so the binary left two free and every
      * library caller took the lot, on a machine somebody might be drawing on.
@@ -342,7 +405,7 @@ int main(void)
     }
 
     printf("libisofill %s: fills between contours, keeps the first pass, "
-           "diffuses a box against a written rim, holds cells for the second pass, "
+           "diffuses a box against a written rim, holds cells for the second pass and in reach, "
            "leaves inputs alone, "
            "defaults to all but two cores, refuses nonsense\n",
            isofill_version());

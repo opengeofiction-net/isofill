@@ -200,9 +200,16 @@ int main(void)
         snprintf(path, sizeof path, "%s/ooc.log", dir);
         f = fopen(path, "r");
         if (!f) return fail("cannot read the out-of-core run's log");
-        while (fgets(line, sizeof line, f))
+        long long held_n = -1, reached = -1;
+        while (fgets(line, sizeof line, f)) {
             if (strstr(line, "of its arrays were in files")) sscanf(line, " pass 2: %lf", &filed);
+            if (strstr(line, "more in reach of them"))
+                sscanf(line, " %lld cells held for pass 2, %lld", &held_n, &reached);
+        }
         fclose(f);
+        /* the river reaches ground no contour does, so the reach rule is
+         * exercised out of core and not only in memory */
+        if (held_n <= 0 || reached <= 0) return fail("the river held nothing, or reached no unreached ground");
         ooc_used_files = filed >= 4.0 * COLS * ROWS;
         if (!ooc_used_files) return fail("--max-mem 1 did not put the second pass in files");
     }

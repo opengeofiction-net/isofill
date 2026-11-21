@@ -77,7 +77,9 @@ last whole-raster answer, and get the second pass for the box alone. That is an
 approximation - diffusion is global - and how good one is depends on how far a
 change travels in the data at hand. `isofill_run_held()` is `isofill_run_ex()`
 with cells held at the caller's values by the second pass, which is `--held`;
-see *Held cells* below.
+see *Held cells* below. `isofill_hold()` is what it does between its passes,
+for a caller that runs them apart: `isofill_run_ex()` with pass 2 off, then
+`isofill_hold()`, then `isofill_diffuse()` is `isofill_run_held()` to the bit.
 
 `isofill_params_default()` hands out the command line's defaults, and that
 includes the threads: a `threads` of zero or less means all but two, the same
@@ -230,9 +232,21 @@ contour beyond it. Held instead, the river is a boundary the solve runs down to,
 and the valley comes out as a valley. Leaving those cells out of the constraints
 is the caller's job; isofill does not touch the constraints.
 
-In core the held raster is read whole, four bytes a cell, and counted towards
-`--max-mem`; out of core it goes into the second pass's surface a block of rows
-at a time. `tests/pass2_ooc` holds a river in its fixture, so the two agree to
+**A held cell is in reach**, since 0.15.0. Ground no constraint reaches floods
+as void from the edge of the drawn area and is held at zero; a river held where
+it is all that says how low the ground goes left that ground at sea level with
+the river standing in it - 31,727 cells of castellan's land, in a valley at
+290 m, on 0.14.0. So a cell out of reach of every constraint but within the
+radius of a held cell is declined instead, and solved. Within the square of
+side 2 radius + 1 rather than the circle the first pass judges reach by: two
+sliding counts, along the rows and down the columns. So a held cell reaches a
+little further, at the corners, than a constraint does. The first pass is as
+it was.
+
+In core the held raster is read whole, four bytes a cell, and its reach marked,
+one more, and both are counted towards `--max-mem`; out of core it goes into the second pass's surface a block of rows
+at a time, and the reach marks, a byte a cell, are kept where the second pass
+keeps its arrays. `tests/pass2_ooc` holds a river in its fixture, so the two agree to
 the bit with it too.
 
 ### The edge
