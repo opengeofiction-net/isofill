@@ -1,3 +1,24 @@
+isofill (0.16.0) unstable; urgency=medium
+
+  * --wall FILE, a wall in the library's new isofill_layers: a cliff. The
+    first pass does not see past one and never answers it; the second does
+    not diffuse across one, its neighbours leaving it out of their mean at
+    the finest level, and a wall cell then takes the highest of them - the
+    cliff's top. A wall nothing reaches is passable to the void's flood and
+    is never held at zero itself. For danu #191.
+  * isofill_run_layers() takes every input beside the constraints in one
+    struct; isofill_run_held() is it with no wall. isofill_diffuse_wall()
+    is the second pass with walls, for a caller running the passes apart.
+  * Nothing changes without --wall, to the bit (golden square, in core and
+    out). The out-of-core pass 2 counts the wall among the masks it holds.
+  * tests/run_lib: a wall keeps each side level with its own contour, the
+    wall at the top, never answered by the first pass; the passes apart are
+    the whole; a wall touching the raster's edge is not dug to zero.
+    tests/pass2_ooc carries a wall across its band joins, the same to the
+    bit out of core.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Sat, 21 Nov 2026 17:06:58 +0000
+
 isofill (0.15.0) unstable; urgency=medium
 
   * A held cell is in reach: a cell out of reach of every constraint but

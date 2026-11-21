@@ -79,7 +79,9 @@ change travels in the data at hand. `isofill_run_held()` is `isofill_run_ex()`
 with cells held at the caller's values by the second pass, which is `--held`;
 see *Held cells* below. `isofill_hold()` is what it does between its passes,
 for a caller that runs them apart: `isofill_run_ex()` with pass 2 off, then
-`isofill_hold()`, then `isofill_diffuse()` is `isofill_run_held()` to the bit.
+`isofill_hold()`, then `isofill_diffuse()` is `isofill_run_held()` to the bit. `isofill_run_layers()`
+takes every input beside the constraints in one struct, the wall among them,
+and `isofill_diffuse_wall()` is the second pass with walls.
 
 `isofill_params_default()` hands out the command line's defaults, and that
 includes the threads: a `threads` of zero or less means all but two, the same
@@ -106,6 +108,7 @@ one it was built against, and `isofill --version` prints the same string.
 | `--no-pass2` | leave the cells the first pass declined unset |
 | `--pass2-margin N` | accepted and ignored: the overlap of the bands the second pass used to be solved in out of core |
 | `--water FILE` | a raster the size of the constraints: where it is not zero the cell is water, held at zero by `--pass2 diffuse` |
+| `--wall FILE` | a raster the size of the constraints: where it is not zero the cell is a wall - a cliff. The first pass does not see past it and the second does not diffuse across it; see *Walls* below |
 | `--held FILE` | a Float32 raster the size of the constraints: where it has a value - not its nodata, not NaN - the cell is held at that value by the second pass. The first pass does not see it; see *Held cells* below |
 | `--no-edge-void` | the raster's edge is not the end of the drawn ground: unreached ground there is solved, the edge mirrored, not held at zero. For a raster that is a piece of a larger area; see *The edge* below |
 | `--max-mem MB` | above this, the first pass works band by band and the second keeps what will not fit in files beside the output - the same answer either way. Default 4096; see below |
@@ -372,3 +375,27 @@ still show; an unbounded second pass window, which changes it by less than a fif
 of a percent; and ray density, where the original's own coarser geometry is worse
 still. Finding it means differencing the first pass cell by cell against the
 original on identical input, rather than more reasoning from its source.
+
+### Walls
+
+`--wall`, a wall in `isofill_layers`, is a cliff: ground that drops at a line,
+so the ground either side of it belongs to its own side (danu #191). Without
+one, a cell on the high side and a contour on the low side are a pair like any
+other, and the fill smooths the drop away.
+
+The first pass does not see past a wall, as it does not see past a
+constraint - it joins the sight mask before `--barrier` widens it - and never
+answers a wall cell itself. The second leaves a wall out: at the finest level
+a wall cell is marked as one, and its neighbours drop it from their sum and
+from their weight, so the solve does not diffuse across it - Neumann there,
+where a fixed cell is Dirichlet. The coarse levels do not see walls; they only
+propose corrections, and the line search judges each against the finest
+level's equation, wall and all. A wall cell then takes the highest of its
+neighbours, the cliff's top, which is where OSM draws one.
+
+A wall cell no constraint reaches is passable to the void's flood, which
+crosses a cliff in ground nobody described, and is never itself held at zero
+- or a cliff touching the void would be flooded end to end into a trench at
+sea level. One that is a constraint, a cliff's top burned with a height, is
+ground like any other. Without a wall nothing changes, to the bit.
+
