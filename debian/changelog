@@ -1,3 +1,19 @@
+isofill (0.15.0) unstable; urgency=medium
+
+  * A held cell is in reach: a cell out of reach of every constraint but
+    within the radius of a held cell (the square of side 2 radius + 1) is
+    declined, and solved, rather than flooded as void and held at zero.
+    On 0.14.0 a graded river that was all that described the ground below
+    the lowest contour left that ground at sea level with the river
+    standing in it - 31,727 cells of castellan's land, at 290 m before.
+  * Nothing changes without --held, to the bit; the first pass is as it was.
+  * tests/run_lib: a river held in unreached ground keeps the ground beside
+    it and within its radius, and what is beyond its reach is still void.
+    tests/pass2_ooc requires the river to reach unreached ground, so the
+    rule is held to the bit out of core too.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Sat, 21 Nov 2026 13:23:38 +0000
+
 isofill (0.14.0) unstable; urgency=medium
 
   * --held FILE, isofill_run_held() in the library: cells held at the

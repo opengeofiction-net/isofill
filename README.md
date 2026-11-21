@@ -230,9 +230,20 @@ contour beyond it. Held instead, the river is a boundary the solve runs down to,
 and the valley comes out as a valley. Leaving those cells out of the constraints
 is the caller's job; isofill does not touch the constraints.
 
-In core the held raster is read whole, four bytes a cell, and counted towards
-`--max-mem`; out of core it goes into the second pass's surface a block of rows
-at a time. `tests/pass2_ooc` holds a river in its fixture, so the two agree to
+**A held cell is in reach**, since 0.15.0. Ground no constraint reaches floods
+as void from the edge of the drawn area and is held at zero; a river held where
+it is all that says how low the ground goes left that ground at sea level with
+the river standing in it - 31,727 cells of castellan's land, in a valley at
+290 m, on 0.14.0. So a cell out of reach of every constraint but within the
+radius of a held cell is declined instead, and solved. Within the square of
+side 2 radius + 1 rather than the circle: two sliding counts, along the rows
+and down the columns, which is the box the first pass's own reach test starts
+from. The first pass is as it was.
+
+In core the held raster is read whole, four bytes a cell, and its reach marked,
+one more, and both are counted towards `--max-mem`; out of core it goes into the second pass's surface a block of rows
+at a time, and the reach marks, a byte a cell, are kept where the second pass
+keeps its arrays. `tests/pass2_ooc` holds a river in its fixture, so the two agree to
 the bit with it too.
 
 ### The edge

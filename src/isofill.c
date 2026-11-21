@@ -1386,6 +1386,65 @@ static long long apply_held(elev *v, const float *held, size_t n)
     return put;
 }
 
+/*
+ * And a held cell is in reach. The first pass calls a cell OUT_OF_REACH when
+ * no constraint is within its radius, and the second floods those from the
+ * edge of the drawn area and holds them at zero, as ground nobody described.
+ * A graded river is a description: as spot heights its vertices were in reach
+ * of the ground round them, and held instead, where the river was all that
+ * said how low the ground went, that ground flooded as void and came out at
+ * sea level with the river standing in it - 31,727 cells of castellan's land,
+ * a valley at 290 m (0.14.0).
+ *
+ * So a cell out of reach of every constraint but within the radius of a held
+ * cell is declined instead: solved, between the river and whatever else
+ * bounds it, and not void. Within the square of side 2 radius + 1, not the
+ * circle - two sliding counts, one along the rows and one down the columns,
+ * where the circle would cost a pass a radius - which is the box the first
+ * pass's own reach test starts from. The first pass itself is as it was.
+ *
+ * held_rows marks, for each cell of nrows rows, whether a held cell lies
+ * within radius along its own row; held_reach takes those marks down the
+ * columns and declines what they reach. Split so the binary's out-of-core
+ * path can mark a block of rows at a time as it reads them.
+ */
+static void held_rows(const float *h, int cols, int nrows, int r, unsigned char *out)
+{
+    int y;
+    for (y = 0; y < nrows; y++) {
+        const float *row = h + (size_t) y * cols;
+        unsigned char *o = out + (size_t) y * cols;
+        int x, n = 0;
+        for (x = 0; x <= r && x < cols; x++) n += is_held(row[x]);
+        for (x = 0; x < cols; x++) {
+            o[x] = (unsigned char) (n > 0);
+            if (x + r + 1 < cols) n += is_held(row[x + r + 1]);
+            if (x - r >= 0) n -= is_held(row[x - r]);
+        }
+    }
+}
+
+static long long held_reach(elev *v, const unsigned char *rowd, int cols, int rows, int r)
+{
+    long long declined = 0;
+    int y, x;
+    int *n = calloc((size_t) cols, sizeof *n);
+    if (!n) return -1;
+    for (y = 0; y <= r && y < rows; y++)
+        for (x = 0; x < cols; x++) n[x] += rowd[(size_t) y * cols + x];
+    for (y = 0; y < rows; y++) {
+        elev *row = v + (size_t) y * cols;
+        for (x = 0; x < cols; x++)
+            if (n[x] && row[x] == OUT_OF_REACH) { row[x] = NO_ELEV; declined++; }
+        if (y + r + 1 < rows)
+            for (x = 0; x < cols; x++) n[x] += rowd[(size_t) (y + r + 1) * cols + x];
+        if (y - r >= 0)
+            for (x = 0; x < cols; x++) n[x] -= rowd[(size_t) (y - r) * cols + x];
+    }
+    free(n);
+    return declined;
+}
+
 /* ------------------------------------------------------------------ pass 1 core */
 /*
  * The per-cell work of pass 1 over a band held in memory. The band is bh rows
@@ -1556,8 +1615,15 @@ long long isofill_run_held(const float *constraints, int has_nodata, double noda
     if (p->pass2) {
         unsigned char *wbuf = NULL, *mbuf = NULL;
         /* after pass1_out is taken: that is the first pass, which never saw these */
-        if (held)
+        if (held) {
+            /* in reach of a held cell is not out of reach; then the values */
+            unsigned char *rowd = malloc(n);
+            if (!rowd) return -2;
+            held_rows(held, cols, rows, p->radius, rowd);
+            if (held_reach(out, rowd, cols, rows, p->radius) < 0) { free(rowd); return -2; }
+            free(rowd);
             apply_held(out, held, n);
+        }
         if (water) {
             wbuf = malloc(n);
             if (!wbuf) return -2;
@@ -1825,9 +1891,10 @@ int main(int argc, char **argv)
 
         whole_mb = isofill_whole_mb(cols, rows);
         /* in core the held values are read whole beside everything else, four
-         * bytes a cell; out of core they go past the second pass a block at a
-         * time and cost nothing to speak of */
-        if (hb) whole_mb += (double) cols * rows * sizeof(float) / (1024 * 1024);
+         * bytes a cell, and their reach marked, one more; out of core they go
+         * past the second pass a block at a time, and the marks are a byte a
+         * cell kept where the second pass keeps its arrays */
+        if (hb) whole_mb += (double) cols * rows * (sizeof(float) + 1) / (1024 * 1024);
 
         opts = CSLSetNameValue(opts, "TILED", "YES");
         /*
@@ -2012,19 +2079,27 @@ int main(int argc, char **argv)
                         /* a block of rows at a time, into the surface the
                          * first pass left: what the library does in one go */
                         int blk = 256, y;
-                        long long put = 0;
+                        long long put = 0, reached;
                         float *hrow = malloc((size_t) cols * blk * sizeof *hrow);
-                        if (!hrow) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                        /* each row's marks, a byte a cell, for the pass down
+                         * the columns: in a file where it will not fit */
+                        unsigned char *rowd = big_alloc((size_t) cols * rows, 0);
+                        if (!hrow || !rowd) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
                         for (y = 0; y < rows; y += blk) {
                             int hh = y + blk <= rows ? blk : rows - y;
                             size_t m = (size_t) cols * hh;
                             IO_(GDALRasterIO(hb, GF_Read, 0, y, cols, hh, hrow, cols, hh,
                                              GDT_Float32, 0, 0));
                             held_unset(hrow, m, held_has_nd, held_nd);
+                            held_rows(hrow, cols, hh, radius, rowd + (size_t) y * cols);
                             put += apply_held(whole + (size_t) y * cols, hrow, m);
                         }
                         free(hrow);
-                        fprintf(stderr, "  %lld cells held for pass 2\n", put);
+                        reached = held_reach(whole, rowd, cols, rows, radius);
+                        big_free(rowd);
+                        if (reached < 0) { fprintf(stderr, "isofill: out of memory\n"); return 1; }
+                        fprintf(stderr, "  %lld cells held for pass 2, %lld more in reach of them\n",
+                                put, reached);
                     }
                     if (wb) {
                         wm = big_alloc((size_t) cols * rows, 0);
