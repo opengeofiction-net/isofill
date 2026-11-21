@@ -1,3 +1,15 @@
+isofill (0.16.1) unstable; urgency=medium
+
+  * A wall stops the void's flood, and a cell beside one that sees nothing
+    past it or along it, with constraints in its radius, is declined, not
+    out of reach. On 0.16.0 the flood ran along a cliff from the raster's
+    edge and took those cells: a trench at sea level a cell beside every
+    cliff touching the void, found building Danu's #191 cliffs.
+  * Nothing changes without --wall, to the bit.
+  * tests/run_lib: the ground beside a wall touching the edge is not void.
+
+ -- Lee Kindness <wangi@opengeofiction.net>  Sat, 21 Nov 2026 17:12:31 +0000
+
 isofill (0.16.0) unstable; urgency=medium
 
   * --wall FILE, a wall in the library's new isofill_layers: a cliff. The
